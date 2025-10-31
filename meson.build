@@ -173,7 +173,7 @@ prefix_path = get_option('prefix')
 prefix_inc = prefix_path + '/include'
 
 ucx_path = get_option('ucx_path')
-if ucx_path != ''
+if ucx_path != '' and fs.exists(ucx_path)
   ucx_lib_path = ucx_path + '/lib'
   ucx_inc_path = ucx_path + '/include'
   # Check if path is absolute
@@ -186,8 +186,11 @@ if ucx_path != ''
       link_args : ['-L' + ucx_lib_path, '-lucp', '-lucs', '-luct'],
       include_directories : include_directories(ucx_inc_path))
   endif
-else
+elif ucx_path == ''
   ucx_dep = dependency('ucx', modules: ['ucx::ucs', 'ucx::ucp', 'ucx::uct'], required: false)
+else
+  # UCX path specified but doesn't exist - create a not-found dependency
+  ucx_dep = disabler()
 endif
 
 libfabric_path = get_option('libfabric_path')
