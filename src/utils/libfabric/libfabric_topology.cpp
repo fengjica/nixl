@@ -148,6 +148,18 @@ nixlLibfabricTopology::getEfaDevicesForGpu(int gpu_id) const {
         return it->second;
     }
     NIXL_WARN << "No EFA devices found for GPU " << gpu_id << ", returning all devices";
+    NIXL_WARN << "[FJDEBUG] trying something here. instead of using gpu_id " << gpu_id
+              << "use " << (gpu_id - 1);
+    gpu_id--;
+    if (gpu_id >= 0) {
+        auto it = gpu_to_efa_devices.find(gpu_id);
+        if (it != gpu_to_efa_devices.end()) {
+            return it->second;
+        }
+    } else {
+        NIXL_WARN << "[FJDEBUG] what!";
+    }
+
     return all_devices;
 }
 
