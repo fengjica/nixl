@@ -139,7 +139,7 @@ nixlLibfabricTopology::getEfaDevicesForGpu(int gpu_id) const {
     for (const auto& it: gpu_to_efa_devices) {
         int gpu_index = it.first;
         const auto& gpu_efa_devices = it.second;
-        NIXL_WARN << "[FJDEBUG] GPU " << gpu_index << ") → "
+        NIXL_WARN << "[FJDEBUG] GPU " << gpu_index << ") -> "
                            << gpu_efa_devices.size() << " EFA devices";
     }
 
@@ -172,10 +172,10 @@ nixlLibfabricTopology::printTopologyInfo() const {
     for (size_t i = 0; i < all_devices.size(); ++i) {
         NIXL_DEBUG << "  [" << i << "] " << all_devices[i];
     }
-    NIXL_DEBUG << "GPU → EFA mapping:";
+    NIXL_DEBUG << "GPU -> EFA mapping:";
     for (const auto &pair : gpu_to_efa_devices) {
         std::stringstream ss;
-        ss << "  GPU " << pair.first << " → [";
+        ss << "  GPU " << pair.first << " -> [";
         for (size_t i = 0; i < pair.second.size(); ++i) {
             if (i > 0) ss << ", ";
             ss << pair.second[i];
@@ -415,7 +415,7 @@ nixlLibfabricTopology::buildPcieToLibfabricMapping() {
                 pcie_to_libfabric_map[pcie_address] = libfabric_name;
                 libfabric_to_pcie_map[libfabric_name] = pcie_address;
 
-                NIXL_DEBUG << "Mapped PCIe " << pcie_address << " → Libfabric " << libfabric_name
+                NIXL_DEBUG << "Mapped PCIe " << pcie_address << " -> Libfabric " << libfabric_name
                            << " (provider=" << provider_name << ")";
             }
         }
@@ -438,7 +438,7 @@ nixlLibfabricTopology::buildGpuToEfaMapping() {
         return buildFallbackMapping();
     }
 
-    NIXL_DEBUG << "Built GPU→EFA mapping for " << gpu_to_efa_devices.size()
+    NIXL_DEBUG << "Built GPU->EFA mapping for " << gpu_to_efa_devices.size()
                << " GPUs using topology-aware algorithm";
 
     return NIXL_SUCCESS;
@@ -480,7 +480,7 @@ nixlLibfabricTopology::buildTopologyAwareGrouping() {
             nic.device_id = device_id;
             nic.function_id = function_id;
             discovered_nics.push_back(nic);
-            NIXL_DEBUG << "Correlated NIC: " << pcie_addr << " → " << libfabric_name;
+            NIXL_DEBUG << "Correlated NIC: " << pcie_addr << " -> " << libfabric_name;
         } else {
             NIXL_WARN << "Could not find hwloc object for PCIe address: " << pcie_addr;
         }
@@ -512,7 +512,7 @@ nixlLibfabricTopology::buildTopologyAwareGrouping() {
     if (status != NIXL_SUCCESS) {
         return status;
     }
-    // Step 4: Convert groups to GPU→EFA mapping
+    // Step 4: Convert groups to GPU->EFA mapping
     for (size_t group_idx = 0; group_idx < nic_groups.size(); ++group_idx) {
         const auto &group = nic_groups[group_idx];
         if (group.has_gpu) {
@@ -539,7 +539,7 @@ nixlLibfabricTopology::buildTopologyAwareGrouping() {
                 NIXL_DEBUG << "GPU " << gpu_index << " (" << std::hex << group.closest_gpu.domain_id
                            << ":" << static_cast<int>(group.closest_gpu.bus_id) << ":"
                            << static_cast<int>(group.closest_gpu.device_id) << "."
-                           << static_cast<int>(group.closest_gpu.function_id) << std::dec << ") → "
+                           << static_cast<int>(group.closest_gpu.function_id) << std::dec << ") -> "
                            << gpu_efa_devices.size() << " EFA devices";
             }
         }
@@ -719,10 +719,10 @@ nixlLibfabricTopology::groupNicsWithGpus(const std::vector<NicInfo> &discovered_
             NIXL_DEBUG << "Group " << i << ": GPU " << std::hex << group.closest_gpu.domain_id
                        << ":" << static_cast<int>(group.closest_gpu.bus_id) << ":"
                        << static_cast<int>(group.closest_gpu.device_id) << "."
-                       << static_cast<int>(group.closest_gpu.function_id) << std::dec << " → "
+                       << static_cast<int>(group.closest_gpu.function_id) << std::dec << " -> "
                        << group.nics.size() << " NICs";
         } else {
-            NIXL_DEBUG << "Group " << i << ": No GPU → " << group.nics.size() << " NICs";
+            NIXL_DEBUG << "Group " << i << ": No GPU -> " << group.nics.size() << " NICs";
         }
     }
     return NIXL_SUCCESS;
