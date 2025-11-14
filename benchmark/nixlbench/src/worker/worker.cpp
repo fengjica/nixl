@@ -20,6 +20,8 @@
 #include "utils/utils.h"
 
 #include <unistd.h>
+#include <chrono>
+#include <iomanip>
 
 // Null runtime for storage backends that don't need ETCD
 class xferBenchNullRT : public xferBenchRT {
@@ -107,7 +109,10 @@ int xferBenchWorker::synchronize() {
     }
 
     if (rt->barrier("sync") != 0) {
-        std::cerr << "Failed to synchronize" << std::endl;
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()) % 1000000;
+        std::cerr << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "." << std::setfill('0') << std::setw(6) << ms.count() << " Failed to synchronize" << std::endl;
         // assuming this is a fatal error, continue benchmarking after synchronization failure does
         // not make sense
         exit(EXIT_FAILURE);

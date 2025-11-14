@@ -52,7 +52,7 @@ private:
     int *terminate;
 
     bool error() const { return terminate != nullptr && *terminate; };
-    bool should_retry(int value, int max = 60) const {
+    bool should_retry(int value, int max = 120) const {
 	    return !error() && value < max;
     }
 
