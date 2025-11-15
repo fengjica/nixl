@@ -935,12 +935,12 @@ nixlLibfabricEngine::prepXfer(const nixl_xfer_op_t &operation,
         backend_handle->binary_notif.setAgentName(localAgent);
         backend_handle->binary_notif.setMessage(opt_args->notifMsg);
         backend_handle->binary_notif.expected_completions = 0;
-        NIXL_DEBUG << "Setting notification message: " << opt_args->notifMsg;
+        NIXL_INFO << "Setting notification message: " << opt_args->notifMsg;
     }
 
     handle = backend_handle; // Assign to base class pointer
 
-    NIXL_DEBUG << "Transfer preparation complete, handle address: " << handle;
+    NIXL_INFO << "Transfer preparation complete, handle address: " << handle;
     return NIXL_SUCCESS;
 }
 
@@ -1031,7 +1031,7 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
         size_t transfer_size = local[desc_idx].len;
         int gpu_id = local[desc_idx].devId;
 
-        NIXL_DEBUG << "Processing descriptor " << desc_idx << " GPU " << gpu_id
+        NIXL_INFO << "Processing descriptor " << desc_idx << " GPU " << gpu_id
                    << " local_addr: " << transfer_addr << " size=" << transfer_size
                    << " remote_addr=" << (void *)remote[desc_idx].addr;
 
@@ -1069,7 +1069,7 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
                    << backend_handle->binary_notif.expected_completions << " requests submitted";
     }
 
-    NIXL_DEBUG << "Processing complete: submitted "
+    NIXL_INFO << "Processing complete: submitted "
                << backend_handle->binary_notif.expected_completions << " requests from "
                << desc_count << " descriptors"
                << " with " << backend_handle->binary_notif.expected_completions
@@ -1192,7 +1192,7 @@ nixlLibfabricEngine::notifSendPriv(const std::string &remote_agent,
     // Set the correct buffer size for the notification
     control_request->buffer_size = sizeof(BinaryNotification);
 
-    NIXL_DEBUG << "Sending binary notification control request"
+    NIXL_INFO << "Sending binary notification control request"
                << " Message: " << binary_notification.getMessage()
                << " expected_completions: " << binary_notification.expected_completions;
     nixl_status_t status = rail_manager.postControlMessage(
@@ -1239,7 +1239,7 @@ nixlLibfabricEngine::getNotifs(notif_list_t &notif_list) {
         notif_list.insert(notif_list.end(), notifMainList_.begin(), notifMainList_.end());
 
         if (!notifMainList_.empty()) {
-            NIXL_DEBUG << "Retrieved " << notifMainList_.size() << " notifications";
+            NIXL_INFO << "Retrieved " << notifMainList_.size() << " notifications";
             // Clear the internal list after copying
             notifMainList_.clear();
             return NIXL_SUCCESS;
