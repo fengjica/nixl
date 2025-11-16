@@ -1189,6 +1189,12 @@ execTransferIterations(nixlAgent *agent,
         // Standard path: Single request for all iterations
         for (int i = 0; i < num_iter; ++i) {
             nixl_status_t rc = execSingleTransfer(agent, req, timer, thread_stats);
+            auto now = std::chrono::system_clock::now();
+            auto time_t = std::chrono::system_clock::to_time_t(now);
+            auto ms = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()) % 1000000;
+
+            std::cout << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "." << std::setfill('0') << std::setw(6) << ms.count()
+                << "Standard path. Iteration " << i << " : " << num_iter << std::endl;
 
             if (__builtin_expect(rc != NIXL_SUCCESS, 0)) {
                 std::cout << "NIXL Xfer failed with status: " << nixlEnumStrings::statusStr(rc)
@@ -1334,6 +1340,14 @@ xferBenchNixlWorker::poll(size_t block_size) {
     /* Polling for actual iterations*/
     do {
         status = agent->getNotifs(notifs);
+        auto now = std::chrono::system_clock::now();
+        auto time_t = std::chrono::system_clock::to_time_t(now);
+        auto ms = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()) % 1000000;
+
+        std::cout << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "." << std::setfill('0') << std::setw(6) << ms.count()
+            << "Current notifs: " << notifs["initiator"].size()
+              << " / " << total_iter << std::endl;
+
     } while (status == NIXL_SUCCESS && total_iter != int(notifs["initiator"].size()));
     synchronize();
 }

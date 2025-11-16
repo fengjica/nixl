@@ -1206,6 +1206,12 @@ nixlLibfabricEngine::notifSendPriv(const std::string &remote_agent,
         return NIXL_ERR_BACKEND;
     }
 
+    NIXL_INFO << "[NOTIF SENT] Agent: " << remote_agent
+          << " XFER_ID: " << binary_notification.xfer_id
+          << " Message: " << binary_notification.getMessage()
+          << " Expected completions: " << binary_notification.expected_completions
+          << std::endl;
+
     return NIXL_SUCCESS;
 }
 
@@ -1373,7 +1379,7 @@ nixlLibfabricEngine::processNotification(const std::string &serialized_notif) {
     uint16_t xfer_id = binary_notif->xfer_id;
     uint32_t expected_completions = binary_notif->expected_completions;
 
-    NIXL_TRACE << "Received notification from " << remote_name << " msg: " << msg
+    NIXL_INFO << "Received notification from " << remote_name << " msg: " << msg
                << " XFER_ID=" << xfer_id << " expected_completions: " << expected_completions;
 
     // Check if this is a transfer notification that needs completions matching
@@ -1573,6 +1579,7 @@ nixlLibfabricEngine::checkPendingNotifications() {
             ++it;
         }
     }
+    NIXL_INFO << "Finished checking pending notifications. Remaining: " << pending_notifications_.size();
 }
 
 void
