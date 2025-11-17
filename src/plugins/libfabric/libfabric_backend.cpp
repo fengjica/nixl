@@ -1236,6 +1236,11 @@ nixlLibfabricEngine::getNotifs(notif_list_t &notif_list) {
         }
     }
 
+    // Proactively check pending notifications to process any that are complete
+    // This ensures notifications don't get stuck waiting for new events
+    NIXL_INFO << "[FJDEBUG] checkPendingNotifications in getNotifs.";
+    checkPendingNotifications();
+
     // Then check for available notifications after processing completions
     // Thread-safe access to internal notification list
     {
@@ -1548,6 +1553,7 @@ nixlLibfabricEngine::addReceivedXferId(uint16_t xfer_id) {
     }
 
     // Check if any notifications can now be completed (after releasing the lock)
+    NIXL_INFO << "[FJDEBUG] checkPendingNotifications in addReceivedXferId: " << xfer_id;
     checkPendingNotifications();
 }
 
