@@ -1238,7 +1238,7 @@ nixlLibfabricEngine::getNotifs(notif_list_t &notif_list) {
 
     // Proactively check pending notifications to process any that are complete
     // This ensures notifications don't get stuck waiting for new events
-    NIXL_INFO << "[FJDEBUG] checkPendingNotifications in getNotifs.";
+    // NIXL_INFO << "[FJDEBUG] checkPendingNotifications in getNotifs.";
     checkPendingNotifications();
 
     // Then check for available notifications after processing completions
@@ -1277,7 +1277,7 @@ nixlLibfabricEngine::cmThread() {
 
         nixl_status_t status = rail_manager.progressAllControlRails();
         if (status == NIXL_SUCCESS) {
-            NIXL_INFO << "CM: Processed completions on control rails";
+            NIXL_DEBUG << "CM: Processed completions on control rails";
         } else if (status != NIXL_IN_PROG && status != NIXL_SUCCESS) {
             NIXL_ERROR << "CM: Failed to process completions on control rails";
             //return NIXL_ERR_BACKEND;
@@ -1536,8 +1536,8 @@ nixlLibfabricEngine::addReceivedXferId(uint16_t xfer_id) {
             // Case 1: Notification already exists (message arrived first or placeholder exists)
             it->second.received_completions++;
 
-            NIXL_INFO << "Incremented received count for XFER_ID " << xfer_id << ": "
-                       << it->second.received_completions << "/" << it->second.expected_completions;
+            // NIXL_INFO << "Incremented received count for XFER_ID " << xfer_id << ": "
+            //            << it->second.received_completions << "/" << it->second.expected_completions;
         } else {
             // Case 2: Write arrived before notification - create placeholder with INT_MAX
             PendingNotification placeholder;
@@ -1555,7 +1555,7 @@ nixlLibfabricEngine::addReceivedXferId(uint16_t xfer_id) {
     }
 
     // Check if any notifications can now be completed (after releasing the lock)
-    NIXL_INFO << "[FJDEBUG] checkPendingNotifications in addReceivedXferId: " << xfer_id;
+    // NIXL_INFO << "[FJDEBUG] checkPendingNotifications in addReceivedXferId: " << xfer_id;
     checkPendingNotifications();
 }
 
@@ -1567,11 +1567,12 @@ void
 nixlLibfabricEngine::checkPendingNotifications() {
     std::lock_guard<std::mutex> lock(receiver_tracking_mutex_);
     auto it = pending_notifications_.begin();
+    std::vector<uint16_t> xfer_remaining;
     while (it != pending_notifications_.end()) {
         // Check if transfer is complete by checking if all the remote completions for
         // the xfer_id are received.
         if (it->second.received_completions >= it->second.expected_completions) {
-            NIXL_TRACE << "Received all remote completions for queued notification, processing now";
+            NIXL_INFO << "Received all remote completions for queued notification, processing now " << it->first;
 
             // Move notification to main list (need to acquire notif_mutex_)
             {
@@ -1585,9 +1586,32 @@ nixlLibfabricEngine::checkPendingNotifications() {
             it = pending_notifications_.erase(it);
         } else {
             ++it;
+            xfer_remaining.push_back(it->first);
         }
     }
-    NIXL_INFO << "Finished checking pending notifications. Remaining: " << pending_notifications_.size();
+
+    static int times = 0;
+    static long unsigned int remain_size = 0;
+    static std::string result;
+    result.reserve(16 * 8);
+    if (pending_notifications_.size() != remain_size) {
+        times = 0;
+        remain_size = pending_notifications_.size();
+    } else if (remain_size != 0) {
+        times++;
+        if (times % 100 == 0 && times > 1) {
+            result.clear();
+            if (!xfer_remaining.empty()) {
+
+                for (size_t i = 0; i < xfer_remaining.size() && i < 16; ++i) {
+                    if (i > 0) result += ", ";
+                    result += std::to_string(xfer_remaining[i]);
+                }
+            }
+            NIXL_INFO << "Finished checking pending notifications. Remaining: " << pending_notifications_.size()
+                 << ". uncompleted (first 16): " << result;
+        }
+    }
 }
 
 void
