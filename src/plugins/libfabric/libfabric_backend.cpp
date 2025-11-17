@@ -1270,24 +1270,25 @@ nixlLibfabricEngine::getNotifs(notif_list_t &notif_list) {
 // Background progress function that continuously processes completions on all rails
 nixl_status_t
 nixlLibfabricEngine::cmThread() {
-    NIXL_DEBUG << "CM: Thread started successfully";
-
+    NIXL_INFO << "CM: Thread started successfully";
+    bool error_seen (false);
     // Main progress loop - continuously process completions on all rails
     while (!cm_thread_stop_.load()) {
 
         nixl_status_t status = rail_manager.progressAllControlRails();
         if (status == NIXL_SUCCESS) {
-            NIXL_DEBUG << "CM: Processed completions on control rails";
+            NIXL_INFO << "CM: Processed completions on control rails";
         } else if (status != NIXL_IN_PROG && status != NIXL_SUCCESS) {
             NIXL_ERROR << "CM: Failed to process completions on control rails";
-            return NIXL_ERR_BACKEND;
+            //return NIXL_ERR_BACKEND;
+            error_seen = true;
         }
         // Sleep briefly to avoid spinning too aggressively when blocking cq read is not used
         if (!rail_manager.getControlRail(0).blocking_cq_sread_supported) {
             std::this_thread::sleep_for(std::chrono::nanoseconds(10));
         }
     }
-    NIXL_DEBUG << "CM: Thread exiting cleanly";
+    NIXL_INFO << "CM: Thread exiting cleanly " << error_seen;
     return NIXL_SUCCESS;
 }
 
@@ -1420,6 +1421,7 @@ nixlLibfabricEngine::processNotification(const std::string &serialized_notif) {
         }
 
         // Check if any notifications can now be completed (after releasing the lock)
+        NIXL_INFO << "[FJDEBUG] checkPendingNotifications in processNotification.";
         checkPendingNotifications();
     } else {
         // Regular notification without expected completions - process immediately
