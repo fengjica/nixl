@@ -986,6 +986,9 @@ nixlLibfabricRail::processRemoteWriteCompletion(struct fi_cq_data_entry *comp) c
     uint16_t agent_idx = NIXL_GET_AGENT_INDEX_FROM_IMM(comp->data);
     uint32_t xfer_id = NIXL_GET_XFER_ID_FROM_IMM(comp->data);
 
+    NIXL_INFO << "Received remote write completion (data arrival) on rail " << rail_id
+               << " type=" << msg_type << " agent=" << agent_idx << " XFER_ID=" << xfer_id;
+
     // For remote write completions, we don't need to post a new receive
     // The write operation doesn't consume a receive buffer
     if (msg_type == NIXL_LIBFABRIC_MSG_TRANSFER) {
