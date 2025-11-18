@@ -1585,8 +1585,8 @@ nixlLibfabricEngine::checkPendingNotifications() {
             // Remove from pending list
             it = pending_notifications_.erase(it);
         } else {
-            ++it;
             xfer_remaining.push_back(it->first);
+            ++it;
         }
     }
 
