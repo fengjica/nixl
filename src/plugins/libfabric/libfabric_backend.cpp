@@ -1075,6 +1075,14 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
                << " with " << backend_handle->binary_notif.expected_completions
                << " total XFER_IDs";
 
+    // Log summary of all writes posted for this XFER_ID
+    if (remote_agent != localAgent && backend_handle->binary_notif.expected_completions > 0) {
+        NIXL_INFO << "ALL WRITES POSTED for XFER_ID=" << backend_handle->binary_notif.xfer_id
+                  << " total_requests=" << backend_handle->binary_notif.expected_completions
+                  << " descriptors=" << desc_count
+                  << " remote_agent=" << remote_agent;
+    }
+
     // For same-agent transfers, we need to set the total to 0 since we bypassed all rail operations
     if (remote_agent == localAgent) {
         backend_handle->adjust_total_requests(0);
