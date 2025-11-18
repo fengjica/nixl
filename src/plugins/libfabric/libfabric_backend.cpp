@@ -1536,8 +1536,8 @@ nixlLibfabricEngine::addReceivedXferId(uint16_t xfer_id) {
             // Case 1: Notification already exists (message arrived first or placeholder exists)
             it->second.received_completions++;
 
-            // NIXL_INFO << "Incremented received count for XFER_ID " << xfer_id << ": "
-            //            << it->second.received_completions << "/" << it->second.expected_completions;
+            NIXL_INFO << "Incremented received count for XFER_ID " << xfer_id << ": "
+                      << it->second.received_completions << "/" << it->second.expected_completions;
         } else {
             // Case 2: Write arrived before notification - create placeholder with INT_MAX
             PendingNotification placeholder;
