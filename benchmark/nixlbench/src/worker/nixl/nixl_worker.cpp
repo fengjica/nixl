@@ -1340,15 +1340,22 @@ xferBenchNixlWorker::poll(size_t block_size) {
     synchronize();
 
     /* Polling for actual iterations*/
+    int poll_counter = 0;
     do {
         status = agent->getNotifs(notifs);
-        auto now = std::chrono::system_clock::now();
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-        auto ms = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()) % 1000000;
 
-        std::cout << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "." << std::setfill('0') << std::setw(6) << ms.count()
-            << "Current notifs: " << notifs["initiator"].size()
-              << " / " << total_iter << std::endl;
+        // Log only once every 100 iterations
+        if (poll_counter % 100 == 0) {
+            auto now = std::chrono::system_clock::now();
+            auto time_t = std::chrono::system_clock::to_time_t(now);
+            auto ms = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()) % 1000000;
+
+            std::cout << std::put_time(std::localtime(&time_t), "%H:%M:%S") << "." << std::setfill('0') << std::setw(6) << ms.count()
+                << "Current notifs: " << notifs["initiator"].size()
+                  << " / " << total_iter << std::endl;
+            poll_counter = 0;
+        }
+        poll_counter++;
 
     } while (status == NIXL_SUCCESS && total_iter != int(notifs["initiator"].size()));
     synchronize();
