@@ -612,6 +612,15 @@ nixlLibfabricRail::nixlLibfabricRail(const std::string &device,
         NIXL_INFO << "Successfully pre-posted " << NIXL_LIBFABRIC_RECV_POOL_SIZE
                   << " recv requests for rail " << rail_id;
         NIXL_TRACE << "Successfully initialized rail " << rail_id;
+
+        nixl_status_t progress_status = progressCompletionQueue();
+        if (progress_status == NIXL_SUCCESS || progress_status == NIXL_IN_PROG) {
+            NIXL_INFO << "Progressed completions on rail " << rail_id << " right after init: "
+                      << progress_status;
+        } else {
+            NIXL_WARN << "Failed to progress completions on rail " << rail_id << " right after init: "
+                      << progress_status;
+        }
     }
     catch (...) {
         fi_freeinfo(hints);
