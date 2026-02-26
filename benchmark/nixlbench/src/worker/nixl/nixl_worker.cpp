@@ -1393,11 +1393,14 @@ xferBenchNixlWorker::transfer(size_t block_size,
     // Synchronize to ensure all processes have completed the warmup (iter and polling)
     synchronize();
 
+    // Initiator sleeps for 5 seconds after synchronization
+    sleep(5);
+
     // Log timing after warmup synchronization
     struct timeval tv_after_warmup;
     gettimeofday(&tv_after_warmup, nullptr);
     std::cout << "[ transfer(" << block_size << ") ] "
-              << "After warmup synchronize - tv_sec: " << tv_after_warmup.tv_sec
+              << "After warmup synchronize (+5 sec sleep) - tv_sec: " << tv_after_warmup.tv_sec
               << ", tv_usec: " << tv_after_warmup.tv_usec << std::endl;
 
     stats.clear();
