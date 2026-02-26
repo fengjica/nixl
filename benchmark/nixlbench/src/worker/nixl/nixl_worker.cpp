@@ -1393,6 +1393,13 @@ xferBenchNixlWorker::transfer(size_t block_size,
     // Synchronize to ensure all processes have completed the warmup (iter and polling)
     synchronize();
 
+    // Log timing after warmup synchronization
+    struct timeval tv_after_warmup;
+    gettimeofday(&tv_after_warmup, nullptr);
+    std::cout << "[ transfer(" << block_size << ") ] "
+              << "After warmup synchronize - tv_sec: " << tv_after_warmup.tv_sec
+              << ", tv_usec: " << tv_after_warmup.tv_usec << std::endl;
+
     stats.clear();
 
     ret = execTransfer(
@@ -1425,6 +1432,13 @@ xferBenchNixlWorker::poll(size_t block_size) {
         status = agent->getNotifs(notifs);
     } while (status == NIXL_SUCCESS && skip != int(notifs["initiator"].size()));
     synchronize();
+
+    // Log timing after warmup synchronization
+    struct timeval tv_after_warmup;
+    gettimeofday(&tv_after_warmup, nullptr);
+    std::cout << "[ poll(" << block_size << ") ] "
+              << "After warmup synchronize - tv_sec: " << tv_after_warmup.tv_sec
+              << ", tv_usec: " << tv_after_warmup.tv_usec << std::endl;
 
     /* Polling for actual iterations*/
     do {
