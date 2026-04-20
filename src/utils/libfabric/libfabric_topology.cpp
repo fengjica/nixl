@@ -233,7 +233,7 @@ nixlLibfabricTopology::getPcieDevData(const std::string &efa_device,
         NIXL_DEBUG << "EFA device " << efa_device << " has upstream link speed "
                    << device_link_speed << " Gbps, and is associated with NUMA node "
                    << numa_node_id << " through PCIe switch on domain/bus-id "
-                   << parent_switch_domain << "/" << parent_switch_bus_id
+                   << parent_switch_domain << "/" << static_cast<unsigned>(parent_switch_bus_id)
                    << " with upstream link speed of " << parent_switch_link_speed << " Gbps";
     }
     return found;
