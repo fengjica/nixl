@@ -1472,8 +1472,8 @@ xferBenchNixlWorker::poll(size_t block_size) {
     // Fires at most once every liveness_check_interval to avoid
     // saturating etcd with get() calls during tight polling loops.
     using namespace std::chrono_literals;
-    auto last_liveness_check = std::chrono::steady_clock::now();
     constexpr auto liveness_check_interval = 5s;
+    auto last_liveness_check = std::chrono::steady_clock::now() - liveness_check_interval;
     auto checkLiveness = [&]() {
         const auto now = std::chrono::steady_clock::now();
         if (now - last_liveness_check >= liveness_check_interval) {
