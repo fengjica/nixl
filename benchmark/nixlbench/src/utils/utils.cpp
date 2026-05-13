@@ -1149,6 +1149,12 @@ xferBenchUtils::printStats(bool is_target,
                      (total_duration / 1e6)); // In GB/Sec
 
     if (IS_PAIRWISE_AND_SG() && rt->getSize() > 2) {
+        // Per-rank logging: each initiator prints its own device-pair throughput
+        std::cout << std::fixed << std::setprecision(6)
+                  << "[Rank " << rt->getRank() << "] "
+                  << "blk=" << block_size << " "
+                  << "B/W: " << throughput_gb << " GB/s"
+                  << std::endl;
         rt->reduceSumDouble(&throughput_gb, &totalbw, 0);
     } else {
         totalbw = throughput_gb;
