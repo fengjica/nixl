@@ -17,6 +17,7 @@
 #ifndef NIXL_SRC_CORE_TELEMETRY_TELEMETRY_EVENT_H
 #define NIXL_SRC_CORE_TELEMETRY_TELEMETRY_EVENT_H
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -26,7 +27,7 @@
 constexpr char TELEMETRY_BUFFER_SIZE_VAR[] = "NIXL_TELEMETRY_BUFFER_SIZE";
 constexpr char TELEMETRY_RUN_INTERVAL_VAR[] = "NIXL_TELEMETRY_RUN_INTERVAL";
 
-constexpr inline int TELEMETRY_VERSION = 2;
+constexpr inline int TELEMETRY_VERSION = 3;
 
 /**
  * @enum nixl_telemetry_category_t
@@ -133,6 +134,7 @@ struct nixlTelemetryEvent {
     nixl_telemetry_category_t category_; // Main event category for filtering
     nixl_telemetry_event_type_t eventType_; // Detailed event type/identifier
     uint64_t value_; // Numeric value associated with the event
+    uint64_t timestamp_; // Nanoseconds since epoch when event was created
 
     nixlTelemetryEvent() noexcept = default;
 
@@ -141,7 +143,10 @@ struct nixlTelemetryEvent {
                        uint64_t value) noexcept
         : category_(category),
           eventType_(event_type),
-          value_(value) {}
+          value_(value),
+          timestamp_(static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  std::chrono::system_clock::now().time_since_epoch()).count())) {}
 };
 
 #endif

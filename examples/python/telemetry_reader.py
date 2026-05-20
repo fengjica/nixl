@@ -17,6 +17,7 @@
 
 import argparse
 import ctypes
+from datetime import datetime, timezone
 import logging
 import mmap
 import os
@@ -33,7 +34,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants from telemetry_event.h
-TELEMETRY_VERSION = 2
+TELEMETRY_VERSION = 3
 
 # NIXL telemetry categories
 NIXL_TELEMETRY_MEMORY = 0
@@ -89,6 +90,7 @@ class NixlTelemetryEvent(ctypes.Structure):
         ("event_type", ctypes.c_uint8),
         ("_padding", ctypes.c_char * 3),
         ("value", ctypes.c_uint64),
+        ("timestamp", ctypes.c_uint64),
     ]
 
 
@@ -285,6 +287,13 @@ def print_telemetry_event(event):
     logger.info("Category: %s", category_str)
     logger.info("Event: %s", event_name)
     logger.info("Value: %s", event.value)
+
+    # Convert nanoseconds since epoch to human-readable UTC time
+    ts_sec = event.timestamp / 1_000_000_000
+    ts_ns = event.timestamp % 1_000_000_000
+    dt = datetime.fromtimestamp(ts_sec, tz=timezone.utc)
+    logger.info("Timestamp: %s.%09d UTC", dt.strftime("%Y-%m-%d %H:%M:%S"), ts_ns)
+
     logger.info("===========================")
 
 
