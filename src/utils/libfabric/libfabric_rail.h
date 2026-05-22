@@ -334,7 +334,7 @@ public:
     // Callback registration methods
     /** Set callback for notification message processing */
     void
-    setNotificationCallback(std::function<void(const std::string &)> callback);
+    setNotificationCallback(std::function<void(const std::string &, fi_addr_t)> callback);
 
     /**
      * @brief Enable or disable a progress thread that handles CQ draining.
@@ -345,9 +345,11 @@ public:
     void
     setProgressThreadEnabled(bool enabled);
 
-    /** Set callback for XFER_ID tracking */
+    /** Set callback for XFER_ID tracking.
+     *  Signature: (imm_data, src_addr_in_this_rail_av). src_addr is needed for
+     *  per-peer keying of pending_notifications_ on the receiver. */
     void
-    setXferIdCallback(std::function<void(uint32_t)> callback);
+    setXferIdCallback(std::function<void(uint32_t, fi_addr_t)> callback);
 
     // Optimized resource management methods
     /** Allocate control request with size validation */
@@ -383,10 +385,10 @@ private:
     // Whether a progress thread is handling CQ draining
     bool progress_thread_enabled_ = false;
 
-    // Callback functions
-    std::function<void(const std::string &)> notificationCallback;
+    // Callback functions; src_addr is in *this* rail's AV.
+    std::function<void(const std::string &, fi_addr_t)> notificationCallback;
     // XFER_ID tracking callback
-    std::function<void(uint32_t)> xferIdCallback;
+    std::function<void(uint32_t, fi_addr_t)> xferIdCallback;
 
     // Separate request pools for optimal performance
     ControlRequestPool control_request_pool_;
@@ -397,15 +399,15 @@ private:
 
 
     nixl_status_t
-    processCompletionQueueEntry(struct fi_cq_data_entry *comp) const;
+    processCompletionQueueEntry(struct fi_cq_data_entry *comp, fi_addr_t src_addr) const;
     nixl_status_t
     processLocalSendCompletion(struct fi_cq_data_entry *comp) const;
     nixl_status_t
     processLocalTransferCompletion(struct fi_cq_data_entry *comp, const char *operation_type) const;
     nixl_status_t
-    processRecvCompletion(struct fi_cq_data_entry *comp) const;
+    processRecvCompletion(struct fi_cq_data_entry *comp, fi_addr_t src_addr) const;
     nixl_status_t
-    processRemoteWriteCompletion(struct fi_cq_data_entry *comp) const;
+    processRemoteWriteCompletion(struct fi_cq_data_entry *comp, fi_addr_t src_addr) const;
 };
 
 

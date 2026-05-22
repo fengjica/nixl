@@ -243,8 +243,21 @@ private:
               agent_name_length(0) {}
     };
 
-    // O(1) lookup with postXferID key
-    std::unordered_map<uint16_t, PendingNotification> pending_notifications_;
+    // O(1) lookup with composite key = (peer_idx << 16) | notif_xfer_id.
+    // Keying on the peer index makes the cross-sender xfer_id collision impossible:
+    // two senders both shipping notif_xfer_id=1026 land in distinct map slots.
+    static inline uint64_t
+    makePendingKey(size_t peer_idx, uint16_t notif_xfer_id) {
+        return (static_cast<uint64_t>(peer_idx) << 16) | notif_xfer_id;
+    }
+    std::unordered_map<uint64_t, PendingNotification> pending_notifications_;
+
+    // Reverse map per rail: src_addr (fi_addr_t in that rail's AV) -> peer_idx.
+    // Populated at connection creation (createAgentConnection / self-connection)
+    // and consumed in processNotification / addReceivedXferId to translate the
+    // incoming completion's src_addr back into a peer identity for the join key.
+    // Indexed by rail_id -> map<fi_addr_t, peer_idx>.
+    std::vector<std::unordered_map<fi_addr_t, size_t>> rail_src_to_peer_idx_;
 
     // Connection management helpers
     nixl_status_t
@@ -283,9 +296,12 @@ private:
     progressThread();
 
 
-    // Engine message processing methods
+    // Engine message processing methods.
+    // src_addr/rail_id identify the peer (looked up via rail_src_to_peer_idx_).
     void
-    processNotification(const std::string &serialized_notif);
+    processNotification(const std::string &serialized_notif,
+                        fi_addr_t src_addr,
+                        size_t rail_id);
     nixl_status_t
     loadMetadataHelper(const std::vector<uint64_t> &rail_keys,
                        void *buffer,
@@ -581,9 +597,11 @@ public:
      * Thread-safe method to track received data transfers.
      *
      * @param[in] xfer_id 16-bit transfer ID that was received
+     * @param[in] src_addr provider-supplied source address from the rail's AV
+     * @param[in] rail_id which rail this completion arrived on
      */
     void
-    addReceivedXferId(uint16_t xfer_id);
+    addReceivedXferId(uint16_t xfer_id, fi_addr_t src_addr, size_t rail_id);
 
     // Notification Queuing Helper Methods
     /**

@@ -414,6 +414,8 @@ nixlLibfabricRail::nixlLibfabricRail(const std::string &device,
     hints->caps = 0;
     hints->caps = FI_MSG | FI_RMA | FI_HMEM; // Try with FI_HMEM first
     hints->caps |= FI_LOCAL_COMM | FI_REMOTE_COMM;
+    hints->caps |= FI_SOURCE; // demand source address on receive completions
+                              // (used for per-peer keyed pending_notifications_)
     hints->mode = FI_CONTEXT;
     hints->ep_attr->type = FI_EP_RDM;
     // Configure memory registration mode based on provider capabilities
@@ -446,6 +448,7 @@ nixlLibfabricRail::nixlLibfabricRail(const std::string &device,
             // Retry without FI_HMEM
             hints->caps = FI_MSG | FI_RMA;
             hints->caps |= FI_LOCAL_COMM | FI_REMOTE_COMM;
+            hints->caps |= FI_SOURCE;
 
             ret = fi_getinfo(FI_VERSION(1, 18), NULL, NULL, 0, hints, &info);
             if (ret) {
@@ -696,7 +699,8 @@ nixlLibfabricRail::cleanup() {
 }
 
 void
-nixlLibfabricRail::setNotificationCallback(std::function<void(const std::string &)> callback) {
+nixlLibfabricRail::setNotificationCallback(
+    std::function<void(const std::string &, fi_addr_t)> callback) {
     notificationCallback = callback;
 }
 
@@ -706,7 +710,7 @@ nixlLibfabricRail::setProgressThreadEnabled(bool enabled) {
 }
 
 void
-nixlLibfabricRail::setXferIdCallback(std::function<void(uint32_t)> callback) {
+nixlLibfabricRail::setXferIdCallback(std::function<void(uint32_t, fi_addr_t)> callback) {
     xferIdCallback = callback;
 }
 
@@ -715,6 +719,9 @@ nixl_status_t
 nixlLibfabricRail::progressCompletionQueue() const {
     // Completion processing
     struct fi_cq_data_entry completions[NIXL_LIBFABRIC_CQ_BATCH_SIZE];
+    // FI_SOURCE-supplied source addresses, one per completion entry; only
+    // meaningful for FI_RECV / FI_REMOTE_* completions (sends have undefined src).
+    fi_addr_t src_addrs[NIXL_LIBFABRIC_CQ_BATCH_SIZE];
 
     int ret;
 
@@ -723,7 +730,9 @@ nixlLibfabricRail::progressCompletionQueue() const {
         std::lock_guard<std::mutex> ep_lock(ep_mutex_);
 
         // Non-blocking read (used by progress thread or fallback)
-        ret = fi_cq_read(cq, completions, NIXL_LIBFABRIC_CQ_BATCH_SIZE);
+        // Use fi_cq_readfrom so we get per-completion src_addr from the
+        // provider; required for per-peer keying of pending_notifications_.
+        ret = fi_cq_readfrom(cq, completions, NIXL_LIBFABRIC_CQ_BATCH_SIZE, src_addrs);
 
         if (ret < 0 && ret != -FI_EAGAIN) {
             NIXL_ERROR << "fi_cq_read returned error " << ret << " on rail " << rail_id << ": "
@@ -753,7 +762,7 @@ nixlLibfabricRail::progressCompletionQueue() const {
     if (ret > 0) {
         for (int i = 0; i < ret; ++i) {
             // Process completion using local data. Callbacks have their own thread safety
-            nixl_status_t status = processCompletionQueueEntry(&completions[i]);
+            nixl_status_t status = processCompletionQueueEntry(&completions[i], src_addrs[i]);
             if (status != NIXL_SUCCESS) {
                 NIXL_ERROR << "Failed to process completion " << i << " out of batch of " << ret
                            << " on rail " << rail_id;
@@ -770,7 +779,8 @@ nixlLibfabricRail::progressCompletionQueue() const {
 
 // Route completion to appropriate handler (rail-specific)
 nixl_status_t
-nixlLibfabricRail::processCompletionQueueEntry(struct fi_cq_data_entry *comp) const {
+nixlLibfabricRail::processCompletionQueueEntry(struct fi_cq_data_entry *comp,
+                                                fi_addr_t src_addr) const {
     uint64_t flags = comp->flags;
 
     NIXL_TRACE << "Routing completion from rail " << rail_id << " with flags=" << std::hex << flags
@@ -784,7 +794,7 @@ nixlLibfabricRail::processCompletionQueueEntry(struct fi_cq_data_entry *comp) co
 
     } else if (flags & FI_RECV) {
         // Receive completions - use immediate data
-        return processRecvCompletion(comp);
+        return processRecvCompletion(comp, src_addr);
 
     } else if (flags & FI_WRITE) {
         // Local write completions (fi_writedata) - use context
@@ -796,7 +806,7 @@ nixlLibfabricRail::processCompletionQueueEntry(struct fi_cq_data_entry *comp) co
 
     } else if (flags & FI_REMOTE_WRITE || flags & FI_REMOTE_CQ_DATA) {
         // Remote write completions (from fi_writedata) - use immediate data
-        return processRemoteWriteCompletion(comp);
+        return processRemoteWriteCompletion(comp, src_addr);
 
     } else {
         // Add more detailed warning for unknown completion flags
@@ -891,7 +901,8 @@ nixlLibfabricRail::processLocalTransferCompletion(struct fi_cq_data_entry *comp,
 
 // Handle remote receive completions (conn_req, conn_ack, notification messages)
 nixl_status_t
-nixlLibfabricRail::processRecvCompletion(struct fi_cq_data_entry *comp) const {
+nixlLibfabricRail::processRecvCompletion(struct fi_cq_data_entry *comp,
+                                          fi_addr_t src_addr) const {
     // Get the request from context to access the received buffer
     nixlLibfabricReq *req = findRequestFromContext(comp->op_context);
     if (!req) {
@@ -917,7 +928,7 @@ nixlLibfabricRail::processRecvCompletion(struct fi_cq_data_entry *comp) const {
 
         // Call engine's callback to store notification in central storage (like reference)
         if (notificationCallback) {
-            notificationCallback(message);
+            notificationCallback(message, src_addr);
             NIXL_TRACE << "Notification stored via callback";
         } else {
             NIXL_ERROR << "No notification callback set!";
@@ -951,7 +962,8 @@ nixlLibfabricRail::processRecvCompletion(struct fi_cq_data_entry *comp) const {
 
 // Handle remote write completions (data arrival notification)
 nixl_status_t
-nixlLibfabricRail::processRemoteWriteCompletion(struct fi_cq_data_entry *comp) const {
+nixlLibfabricRail::processRemoteWriteCompletion(struct fi_cq_data_entry *comp,
+                                                 fi_addr_t src_addr) const {
     // Decode the immediate data format
     uint64_t msg_type = NIXL_GET_MSG_TYPE_FROM_IMM(comp->data);
     uint16_t agent_idx = NIXL_GET_AGENT_INDEX_FROM_IMM(comp->data);
@@ -966,7 +978,7 @@ nixlLibfabricRail::processRemoteWriteCompletion(struct fi_cq_data_entry *comp) c
 
         // Call XFER_ID tracking callback to add received XFER_ID to global set
         if (xferIdCallback) {
-            xferIdCallback(comp->data);
+            xferIdCallback(comp->data, src_addr);
             NIXL_TRACE << "Called XFER_ID callback for XFER_ID " << xfer_id;
         } else {
             NIXL_ERROR << "No XFER_ID callback set for rail " << rail_id;

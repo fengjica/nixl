@@ -346,23 +346,29 @@ nixlLibfabricEngine::nixlLibfabricEngine(const nixlBackendInitParams *init_param
     try {
         NIXL_INFO << "Rail Manager created with " << rail_manager.getNumRails() << " rails";
 
+        // Size the per-rail src_addr -> peer_idx reverse map.
+        rail_src_to_peer_idx_.assign(rail_manager.getNumRails(), {});
+
         // Set up notification callback on rail 0
         size_t notification_rail_id = 0;
         NIXL_DEBUG << "Set notification processor for rail 0";
         rail_manager.getRail(notification_rail_id)
-            .setNotificationCallback([this](const std::string &serialized_notif) {
-                processNotification(serialized_notif);
-            });
+            .setNotificationCallback(
+                [this, notification_rail_id](const std::string &serialized_notif,
+                                              fi_addr_t src_addr) {
+                    processNotification(serialized_notif, src_addr, notification_rail_id);
+                });
 
         // Set up XFER_ID tracking callbacks for all rails
         NIXL_DEBUG << "Setting up XFER_ID tracking callbacks for " << rail_manager.getNumRails()
                    << " rails";
         for (size_t rail_id = 0; rail_id < rail_manager.getNumRails(); ++rail_id) {
-            rail_manager.getRail(rail_id).setXferIdCallback([this](uint64_t imm_data) {
-                // Extract XFER_ID from immediate data
-                uint16_t xfer_id = NIXL_GET_XFER_ID_FROM_IMM(imm_data);
-                addReceivedXferId(xfer_id);
-            });
+            rail_manager.getRail(rail_id).setXferIdCallback(
+                [this, rail_id](uint64_t imm_data, fi_addr_t src_addr) {
+                    // Extract XFER_ID from immediate data
+                    uint16_t xfer_id = NIXL_GET_XFER_ID_FROM_IMM(imm_data);
+                    addReceivedXferId(xfer_id, src_addr, rail_id);
+                });
             NIXL_DEBUG << "Set XFER_ID callback for rail " << rail_id;
         }
 
@@ -607,6 +613,20 @@ nixlLibfabricEngine::createAgentConnection(
         index++;
     });
     conn->agent_index_ = agent_names_.size() - 1;
+
+    // Populate the per-rail reverse map: incoming completions from this peer
+    // will arrive with a src_addr = our fi_addr_t for it in *that rail's* AV.
+    // Translate that back to this peer's agent_index_ so processNotification /
+    // addReceivedXferId can form the (peer_idx, xfer_id) join key.
+    {
+        std::lock_guard<std::mutex> lock(receiver_tracking_mutex_);
+        for (const auto &[rail_id, addrs] : conn->rail_remote_addr_list_) {
+            if (rail_id >= rail_src_to_peer_idx_.size()) continue;
+            for (fi_addr_t a : addrs) {
+                rail_src_to_peer_idx_[rail_id][a] = conn->agent_index_;
+            }
+        }
+    }
 
     // Store connection
     connections_[agent_name] = conn;
@@ -1448,8 +1468,11 @@ nixlLibfabricEngine::progressThread() {
  *****************************************/
 
 void
-nixlLibfabricEngine::processNotification(const std::string &serialized_notif) {
-    NIXL_DEBUG << "Received notification size=" << serialized_notif.size();
+nixlLibfabricEngine::processNotification(const std::string &serialized_notif,
+                                          fi_addr_t src_addr,
+                                          size_t rail_id) {
+    NIXL_DEBUG << "Received notification size=" << serialized_notif.size()
+               << " src_addr=" << src_addr << " rail=" << rail_id;
 
     // Deserialize binary notification
     BinaryNotification binary_notif;
@@ -1483,11 +1506,29 @@ nixlLibfabricEngine::processNotification(const std::string &serialized_notif) {
     {
         std::lock_guard<std::mutex> lock(receiver_tracking_mutex_);
 
+        // Translate src_addr -> peer_idx via the rail's reverse map. If we
+        // haven't yet established a connection for this src_addr we fall back
+        // to peer_idx=0; this should not happen in normal operation because
+        // createAgentConnection populates the map before any traffic can flow.
+        size_t peer_idx = 0;
+        if (rail_id < rail_src_to_peer_idx_.size()) {
+            auto rit = rail_src_to_peer_idx_[rail_id].find(src_addr);
+            if (rit != rail_src_to_peer_idx_[rail_id].end()) {
+                peer_idx = rit->second;
+            } else {
+                NIXL_WARN << "processNotification: unknown src_addr=" << src_addr
+                          << " on rail " << rail_id
+                          << " (no peer mapping); falling back to peer_idx=0";
+            }
+        }
+        const uint64_t key = makePendingKey(peer_idx, notif_xfer_id);
+
         // Use try_emplace to construct in-place - eliminates extra copy
-        auto [it, inserted] = pending_notifications_.try_emplace(notif_xfer_id, notif_xfer_id);
+        auto [it, inserted] = pending_notifications_.try_emplace(key, notif_xfer_id);
 
         if (inserted) {
-            NIXL_DEBUG << "Created pending notification" << " notif_xfer_id=" << notif_xfer_id
+            NIXL_DEBUG << "Created pending notification" << " peer_idx=" << peer_idx
+                       << " notif_xfer_id=" << notif_xfer_id
                        << " expected_completions=" << expected_completions
                        << " expected_msg_fragments=" << notif_seq_len;
         }
@@ -1507,7 +1548,9 @@ nixlLibfabricEngine::processNotification(const std::string &serialized_notif) {
 
         // Check for duplicate fragment
         if (!it->second.message_fragments[notif_seq_id].empty()) {
-            NIXL_WARN << "Duplicate fragment received: notif_seq_id=" << notif_seq_id;
+            NIXL_WARN << "Duplicate fragment received: peer_idx=" << peer_idx
+                      << " notif_xfer_id=" << notif_xfer_id
+                      << " notif_seq_id=" << notif_seq_id;
             return;
         }
 
@@ -1522,7 +1565,8 @@ nixlLibfabricEngine::processNotification(const std::string &serialized_notif) {
             it->second.agent_name_length = agent_name_length;
         }
 
-        NIXL_DEBUG << "Stored fragment" << " notif_xfer_id=" << notif_xfer_id << " fragment "
+        NIXL_DEBUG << "Stored fragment" << " peer_idx=" << peer_idx
+                   << " notif_xfer_id=" << notif_xfer_id << " fragment "
                    << notif_seq_id << "/" << notif_seq_len
                    << " received_msg_fragments=" << it->second.received_msg_fragments
                    << " expected_completions=" << it->second.expected_completions
@@ -1538,14 +1582,28 @@ nixlLibfabricEngine::processNotification(const std::string &serialized_notif) {
  *****************************************/
 
 void
-nixlLibfabricEngine::addReceivedXferId(uint16_t xfer_id) {
+nixlLibfabricEngine::addReceivedXferId(uint16_t xfer_id,
+                                        fi_addr_t src_addr,
+                                        size_t rail_id) {
     {
         std::lock_guard<std::mutex> lock(receiver_tracking_mutex_);
 
+        // Translate src_addr -> peer_idx via the rail's reverse map.
+        size_t peer_idx = 0;
+        if (rail_id < rail_src_to_peer_idx_.size()) {
+            auto rit = rail_src_to_peer_idx_[rail_id].find(src_addr);
+            if (rit != rail_src_to_peer_idx_[rail_id].end()) {
+                peer_idx = rit->second;
+            } else {
+                NIXL_WARN << "addReceivedXferId: unknown src_addr=" << src_addr
+                          << " on rail " << rail_id
+                          << " (no peer mapping); falling back to peer_idx=0";
+            }
+        }
+        const uint64_t key = makePendingKey(peer_idx, xfer_id);
+
         // Use try_emplace to construct in-place - eliminates extra copy
-        // First parameter: map key for lookup
-        // Second parameter: constructor argument for PendingNotification
-        auto [it, inserted] = pending_notifications_.try_emplace(xfer_id, xfer_id);
+        auto [it, inserted] = pending_notifications_.try_emplace(key, xfer_id);
 
         if (inserted) {
             // Set placeholder values for write-arrived-first case
@@ -1554,12 +1612,13 @@ nixlLibfabricEngine::addReceivedXferId(uint16_t xfer_id) {
             it->second.received_completions = 0;
             it->second.expected_msg_fragments = 1; // Default to 1 fragment
             it->second.received_msg_fragments = 0;
-            NIXL_DEBUG << "Created placeholder notification for notif_xfer_id " << xfer_id
-                       << " (write arrived first)";
+            NIXL_DEBUG << "Created placeholder notification for peer_idx=" << peer_idx
+                       << " notif_xfer_id=" << xfer_id << " (write arrived first)";
         }
 
         it->second.received_completions++;
-        NIXL_DEBUG << "Incremented received count for notif_xfer_id " << xfer_id << ": "
+        NIXL_DEBUG << "Incremented received count for peer_idx=" << peer_idx
+                   << " notif_xfer_id=" << xfer_id << ": "
                    << it->second.received_completions << "/" << it->second.expected_completions;
     }
 
