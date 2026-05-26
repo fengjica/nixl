@@ -623,7 +623,12 @@ nixlLibfabricEngine::createAgentConnection(
         for (const auto &[rail_id, addrs] : conn->rail_remote_addr_list_) {
             if (rail_id >= rail_src_to_peer_idx_.size()) continue;
             for (fi_addr_t a : addrs) {
-                rail_src_to_peer_idx_[rail_id][a] = conn->agent_index_;
+                auto [it, inserted] = rail_src_to_peer_idx_[rail_id].try_emplace(a, conn->agent_index_);
+                if (!inserted && it->second != conn->agent_index_) {
+                    NIXL_WARN << "fi_addr_t " << a << " on rail " << rail_id
+                              << " already mapped to peer_idx=" << it->second
+                              << ", not overwriting with " << conn->agent_index_;
+                }
             }
         }
     }
