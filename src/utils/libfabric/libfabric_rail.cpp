@@ -696,8 +696,15 @@ nixlLibfabricRail::cleanup() {
 }
 
 void
-nixlLibfabricRail::setNotificationCallback(std::function<void(const std::string &)> callback) {
+nixlLibfabricRail::setNotificationCallback(
+    std::function<void(const std::string &, uint16_t)> callback) {
     notificationCallback = callback;
+}
+
+void
+nixlLibfabricRail::setHandshakeCallback(
+    std::function<void(const std::string &, uint16_t)> callback) {
+    handshakeCallback = callback;
 }
 
 void
@@ -706,7 +713,7 @@ nixlLibfabricRail::setProgressThreadEnabled(bool enabled) {
 }
 
 void
-nixlLibfabricRail::setXferIdCallback(std::function<void(uint32_t)> callback) {
+nixlLibfabricRail::setXferIdCallback(std::function<void(uint32_t, uint16_t)> callback) {
     xferIdCallback = callback;
 }
 
@@ -915,13 +922,38 @@ nixlLibfabricRail::processRecvCompletion(struct fi_cq_data_entry *comp) const {
         NIXL_TRACE << "Adding message: " << message << " to the notification list on rail "
                    << rail_id;
 
-        // Call engine's callback to store notification in central storage (like reference)
+        // Call engine's callback. agent_idx is the sender's index in OUR
+        // agent_names_ (it told it to us via the handshake) — use it to
+        // demux pending_notifications_.
         if (notificationCallback) {
-            notificationCallback(message);
+            notificationCallback(message, agent_idx);
             NIXL_TRACE << "Notification stored via callback";
         } else {
             NIXL_ERROR << "No notification callback set!";
             return NIXL_ERR_BACKEND;
+        }
+    } else if (msg_type == NIXL_LIBFABRIC_MSG_HANDSHAKE) {
+        // Payload format: 16-bit big-endian assigned_idx, then the sender's
+        // agent_name string for the receiver to look up in connections_.
+        // We tolerate short messages defensively.
+        if (comp->len < sizeof(uint16_t) + 1) {
+            NIXL_ERROR << "Handshake message too short on rail " << rail_id
+                       << " (len=" << comp->len << ")";
+        } else {
+            const char *buf = static_cast<const char *>(req->buffer);
+            uint16_t assigned_idx_be;
+            std::memcpy(&assigned_idx_be, buf, sizeof(uint16_t));
+            const uint16_t assigned_idx = static_cast<uint16_t>(
+                (static_cast<uint8_t>(buf[0]) << 8) | static_cast<uint8_t>(buf[1]));
+            std::string peer_name(buf + sizeof(uint16_t), comp->len - sizeof(uint16_t));
+            NIXL_DEBUG << "Received handshake on rail " << rail_id
+                       << " from peer '" << peer_name << "' assigned_idx=" << assigned_idx;
+            if (handshakeCallback) {
+                handshakeCallback(peer_name, assigned_idx);
+            } else {
+                NIXL_WARN << "No handshake callback set; dropping peer-idx assignment";
+            }
+            (void)assigned_idx_be; // suppress unused if we ever switch decoding
         }
     } else {
         NIXL_ERROR << "Unknown message type: " << std::hex << msg_type << std::dec;
@@ -964,9 +996,12 @@ nixlLibfabricRail::processRemoteWriteCompletion(struct fi_cq_data_entry *comp) c
                    << " bytes" << " agent_idx=" << agent_idx << " XFER_ID=" << xfer_id
                    << " imm_data=" << std::hex << comp->data << std::dec;
 
-        // Call XFER_ID tracking callback to add received XFER_ID to global set
+        // Call XFER_ID tracking callback. agent_idx (decoded above) is the
+        // sender's index in OUR agent_names_ table — set by the sender per
+        // the handshake protocol — and is what the engine uses to demux
+        // pending_notifications_.
         if (xferIdCallback) {
-            xferIdCallback(comp->data);
+            xferIdCallback(comp->data, agent_idx);
             NIXL_TRACE << "Called XFER_ID callback for XFER_ID " << xfer_id;
         } else {
             NIXL_ERROR << "No XFER_ID callback set for rail " << rail_id;

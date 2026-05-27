@@ -28,6 +28,7 @@
 
 #include <iomanip>
 #include <numeric>
+#include <optional>
 
 #include "absl/strings/numbers.h"
 
@@ -346,23 +347,27 @@ nixlLibfabricEngine::nixlLibfabricEngine(const nixlBackendInitParams *init_param
     try {
         NIXL_INFO << "Rail Manager created with " << rail_manager.getNumRails() << " rails";
 
-        // Set up notification callback on rail 0
-        size_t notification_rail_id = 0;
-        NIXL_DEBUG << "Set notification processor for rail 0";
-        rail_manager.getRail(notification_rail_id)
-            .setNotificationCallback([this](const std::string &serialized_notif) {
-                processNotification(serialized_notif);
+        // Set up notification + handshake callbacks on rail 0
+        NIXL_DEBUG << "Set notification + handshake processors for rail 0";
+        rail_manager.getRail(0).setNotificationCallback(
+            [this](const std::string &serialized_notif, uint16_t sender_peer_idx) {
+                processNotification(serialized_notif, sender_peer_idx);
+            });
+        rail_manager.getRail(0).setHandshakeCallback(
+            [this](const std::string &peer_agent_name, uint16_t assigned_idx) {
+                handleHandshake(peer_agent_name, assigned_idx);
             });
 
         // Set up XFER_ID tracking callbacks for all rails
         NIXL_DEBUG << "Setting up XFER_ID tracking callbacks for " << rail_manager.getNumRails()
                    << " rails";
         for (size_t rail_id = 0; rail_id < rail_manager.getNumRails(); ++rail_id) {
-            rail_manager.getRail(rail_id).setXferIdCallback([this](uint64_t imm_data) {
-                // Extract XFER_ID from immediate data
-                uint16_t xfer_id = NIXL_GET_XFER_ID_FROM_IMM(imm_data);
-                addReceivedXferId(xfer_id);
-            });
+            rail_manager.getRail(rail_id).setXferIdCallback(
+                [this](uint64_t imm_data, uint16_t sender_peer_idx) {
+                    // Extract XFER_ID from immediate data
+                    uint16_t xfer_id = NIXL_GET_XFER_ID_FROM_IMM(imm_data);
+                    addReceivedXferId(xfer_id, sender_peer_idx);
+                });
             NIXL_DEBUG << "Set XFER_ID callback for rail " << rail_id;
         }
 
@@ -608,8 +613,44 @@ nixlLibfabricEngine::createAgentConnection(
     });
     conn->agent_index_ = agent_names_.size() - 1;
 
-    // Store connection
+    // Store connection BEFORE sending handshake — peer's handshake response
+    // (handleHandshake) needs to find this entry in connections_.
     connections_[agent_name] = conn;
+
+    // Skip handshake for the self-connection — there's no remote endpoint to
+    // send to, and same-process transfers don't go through the imm_data
+    // demux path anyway. (createAgentConnection is called once with
+    // localAgent at engine init.)
+    if (agent_name != localAgent) {
+        nixl_status_t hs = sendHandshakeTo(*conn);
+        if (hs != NIXL_SUCCESS) {
+            NIXL_WARN << "Handshake send to '" << agent_name << "' failed with status " << hs
+                      << "; their first transfers to us will land in the pre-handshake bucket";
+        }
+
+        // If this peer's handshake to us arrived BEFORE we added them to
+        // connections_, handleHandshake buffered the assignment. Drain it
+        // now so the connection is fully primed for postXfer/notifSendPriv.
+        std::optional<uint16_t> buffered;
+        {
+            std::lock_guard<std::mutex> plk(pending_handshake_mutex_);
+            auto hit = pending_inbound_handshakes_.find(agent_name);
+            if (hit != pending_inbound_handshakes_.end()) {
+                buffered = hit->second;
+                pending_inbound_handshakes_.erase(hit);
+            }
+        }
+        if (buffered) {
+            {
+                std::lock_guard<std::mutex> hlk(conn->handshake_mutex_);
+                conn->local_agent_idx_at_remote_ = *buffered;
+                conn->handshake_received_.store(true, std::memory_order_release);
+            }
+            conn->handshake_cv_.notify_all();
+            NIXL_INFO << "Applied buffered handshake from '" << agent_name
+                      << "' assigned_idx=" << *buffered;
+        }
+    }
 
     NIXL_INFO << "Successfully created connection for agent: " << agent_name << " on "
               << rail_manager.getNumRails() << " rails";
@@ -1063,6 +1104,10 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
         uint64_t remote_registered_base = remote_md->remote_buf_addr_;
 
         size_t submitted_count = 0;
+        // imm_data.agent_idx = the value the receiver expects (our index in
+        // THEIR agent_names_), supplied by the handshake. Falls back to
+        // kPreHandshakeAgentIdx if the handshake hasn't arrived yet.
+        const uint16_t imm_agent_idx = senderImmDataAgentIdx(*conn_it->second);
         nixl_status_t status = rail_manager.prepareAndSubmitTransfer(
             op_type,
             transfer_addr,
@@ -1074,7 +1119,7 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
             remote_md->rail_remote_key_list_,
             remote_md->remote_selected_endpoints_,
             conn_it->second->rail_remote_addr_list_,
-            conn_it->second->agent_index_,
+            imm_agent_idx,
             backend_handle->post_xfer_id,
             [backend_handle]() {
                 backend_handle->increment_completed_requests();
@@ -1342,12 +1387,16 @@ nixlLibfabricEngine::notifSendPriv(const std::string &remote_agent,
                    << " payload_chunk_size=" << header.payload_length << "B"
                    << " notif_xfer_id=" << header.notif_xfer_id;
 
-        // Use rail 0's remote address since notifications now use rails
+        // Use rail 0's remote address since notifications now use rails.
+        // imm_data.agent_idx = handshake-supplied "what they call us" so
+        // the receiver can demux pending_notifications_ by sender.
+        const uint16_t imm_agent_idx =
+            senderImmDataAgentIdx(const_cast<nixlLibfabricConnection &>(*connection));
         nixl_status_t status = rail_manager.postControlMessage(
             nixlLibfabricRailManager::ControlMessageType::NOTIFICATION,
             control_request,
             connection->rail_remote_addr_list_[rail_id][0],
-            connection->agent_index_);
+            imm_agent_idx);
 
         if (status != NIXL_SUCCESS) {
             NIXL_ERROR << "postControlMessage failed on rail " << rail_id << " for fragment "
@@ -1448,8 +1497,10 @@ nixlLibfabricEngine::progressThread() {
  *****************************************/
 
 void
-nixlLibfabricEngine::processNotification(const std::string &serialized_notif) {
-    NIXL_DEBUG << "Received notification size=" << serialized_notif.size();
+nixlLibfabricEngine::processNotification(const std::string &serialized_notif,
+                                          uint16_t sender_peer_idx) {
+    NIXL_DEBUG << "Received notification size=" << serialized_notif.size()
+               << " sender_peer_idx=" << sender_peer_idx;
 
     // Deserialize binary notification
     BinaryNotification binary_notif;
@@ -1483,11 +1534,18 @@ nixlLibfabricEngine::processNotification(const std::string &serialized_notif) {
     {
         std::lock_guard<std::mutex> lock(receiver_tracking_mutex_);
 
-        // Use try_emplace to construct in-place - eliminates extra copy
-        auto [it, inserted] = pending_notifications_.try_emplace(notif_xfer_id, notif_xfer_id);
+        // Compose the join key from the SENDER's index in OUR agent_names_
+        // (carried in the imm_data the sender shipped — the sender learned
+        // it via NIXL_LIBFABRIC_MSG_HANDSHAKE) plus the sender's per-process
+        // xfer_id. Two senders shipping the same xfer_id land in different
+        // map slots because their sender_peer_idx values differ.
+        const uint64_t key = makePendingKey(sender_peer_idx, notif_xfer_id);
+        auto [it, inserted] = pending_notifications_.try_emplace(key, notif_xfer_id);
 
         if (inserted) {
-            NIXL_DEBUG << "Created pending notification" << " notif_xfer_id=" << notif_xfer_id
+            NIXL_DEBUG << "Created pending notification"
+                       << " sender_peer_idx=" << sender_peer_idx
+                       << " notif_xfer_id=" << notif_xfer_id
                        << " expected_completions=" << expected_completions
                        << " expected_msg_fragments=" << notif_seq_len;
         }
@@ -1507,7 +1565,9 @@ nixlLibfabricEngine::processNotification(const std::string &serialized_notif) {
 
         // Check for duplicate fragment
         if (!it->second.message_fragments[notif_seq_id].empty()) {
-            NIXL_WARN << "Duplicate fragment received: notif_seq_id=" << notif_seq_id;
+            NIXL_WARN << "Duplicate fragment received: sender_peer_idx="
+                      << sender_peer_idx << " notif_xfer_id=" << notif_xfer_id
+                      << " notif_seq_id=" << notif_seq_id;
             return;
         }
 
@@ -1538,14 +1598,15 @@ nixlLibfabricEngine::processNotification(const std::string &serialized_notif) {
  *****************************************/
 
 void
-nixlLibfabricEngine::addReceivedXferId(uint16_t xfer_id) {
+nixlLibfabricEngine::addReceivedXferId(uint16_t xfer_id, uint16_t sender_peer_idx) {
     {
         std::lock_guard<std::mutex> lock(receiver_tracking_mutex_);
 
-        // Use try_emplace to construct in-place - eliminates extra copy
-        // First parameter: map key for lookup
-        // Second parameter: constructor argument for PendingNotification
-        auto [it, inserted] = pending_notifications_.try_emplace(xfer_id, xfer_id);
+        // Same join key as processNotification — peer_idx is the SENDER's
+        // index in OUR agent_names_, which the sender embedded in imm_data
+        // per the handshake protocol.
+        const uint64_t key = makePendingKey(sender_peer_idx, xfer_id);
+        auto [it, inserted] = pending_notifications_.try_emplace(key, xfer_id);
 
         if (inserted) {
             // Set placeholder values for write-arrived-first case
@@ -1554,17 +1615,133 @@ nixlLibfabricEngine::addReceivedXferId(uint16_t xfer_id) {
             it->second.received_completions = 0;
             it->second.expected_msg_fragments = 1; // Default to 1 fragment
             it->second.received_msg_fragments = 0;
-            NIXL_DEBUG << "Created placeholder notification for notif_xfer_id " << xfer_id
+            NIXL_DEBUG << "Created placeholder notification for sender_peer_idx="
+                       << sender_peer_idx << " notif_xfer_id=" << xfer_id
                        << " (write arrived first)";
         }
 
         it->second.received_completions++;
-        NIXL_DEBUG << "Incremented received count for notif_xfer_id " << xfer_id << ": "
+        NIXL_DEBUG << "Incremented received count for sender_peer_idx="
+                   << sender_peer_idx << " notif_xfer_id=" << xfer_id << ": "
                    << it->second.received_completions << "/" << it->second.expected_completions;
     }
 
     // Check if any notifications can now be completed (after releasing the lock)
     checkPendingNotifications();
+}
+
+/****************************************
+ * Peer-id handshake protocol
+ *****************************************/
+
+// Wire format for a handshake message body:
+//   bytes [0..2)    : big-endian uint16 = assigned_idx (the index we have for
+//                      this peer in our agent_names_)
+//   bytes [2..end)  : ASCII agent_name of the SENDER of the handshake (us).
+//                      The receiver uses it to look up its own connection
+//                      record for us in connections_ and patch
+//                      local_agent_idx_at_remote_ there.
+//
+// Sized to fit comfortably inside one libfabric control buffer
+// (NIXL_LIBFABRIC_SEND_RECV_BUFFER_SIZE = 8 KiB); the payload is at most
+// (2 + 36) = 38 bytes for a UUIDv4 agent name.
+nixl_status_t
+nixlLibfabricEngine::sendHandshakeTo(const nixlLibfabricConnection &conn) const {
+    const uint16_t assigned_idx = static_cast<uint16_t>(conn.agent_index_);
+    const std::string &my_name = localAgent;
+    const size_t payload_size = sizeof(uint16_t) + my_name.size();
+    if (payload_size > NIXL_LIBFABRIC_SEND_RECV_BUFFER_SIZE) {
+        NIXL_ERROR << "Handshake payload too large (" << payload_size
+                   << " bytes) — agent_name='" << my_name << "'";
+        return NIXL_ERR_BACKEND;
+    }
+
+    constexpr size_t kRailId = 0;
+    nixlLibfabricReq *req =
+        rail_manager.getRail(kRailId).allocateControlRequest(payload_size, 0 /* xfer_id */);
+    if (!req) {
+        NIXL_ERROR << "Failed to allocate control request for handshake to '"
+                   << conn.remoteAgent_ << "'";
+        return NIXL_ERR_BACKEND;
+    }
+    // assigned_idx as 2 big-endian bytes, then the agent_name bytes.
+    char *buf = static_cast<char *>(req->buffer);
+    buf[0] = static_cast<char>((assigned_idx >> 8) & 0xFF);
+    buf[1] = static_cast<char>(assigned_idx & 0xFF);
+    std::memcpy(buf + sizeof(uint16_t), my_name.data(), my_name.size());
+    req->buffer_size = payload_size;
+
+    NIXL_DEBUG << "Sending handshake to '" << conn.remoteAgent_ << "' assigned_idx="
+               << assigned_idx << " (my agent_name='" << my_name << "')";
+    return rail_manager.postControlMessage(
+        nixlLibfabricRailManager::ControlMessageType::HANDSHAKE,
+        req,
+        conn.rail_remote_addr_list_.at(kRailId)[0],
+        /*agent_idx=*/0 /* not used for handshake decode */);
+}
+
+uint16_t
+nixlLibfabricEngine::senderImmDataAgentIdx(nixlLibfabricConnection &conn) const {
+    // Self-connection: same process, no real wire; safe to ship 0.
+    if (conn.remoteAgent_ == localAgent) return 0;
+
+    // Fast path: handshake already received.
+    if (conn.handshake_received_.load(std::memory_order_acquire)) {
+        return conn.local_agent_idx_at_remote_;
+    }
+    // Slow path: wait briefly. In normal NIXL flow both sides do the
+    // metadata exchange first, then createAgentConnection on each side
+    // sends a handshake; latency is usually sub-millisecond. The 5 s cap
+    // is paranoia for stalled peers.
+    using namespace std::chrono_literals;
+    std::unique_lock<std::mutex> lk(conn.handshake_mutex_);
+    if (conn.handshake_cv_.wait_for(lk, 5s, [&] {
+            return conn.handshake_received_.load(std::memory_order_acquire);
+        })) {
+        return conn.local_agent_idx_at_remote_;
+    }
+    NIXL_WARN << "Handshake from peer '" << conn.remoteAgent_
+              << "' not received after 5s; falling back to kPreHandshakeAgentIdx"
+              << " — receiver will join this xfer in the pre-handshake bucket";
+    return kPreHandshakeAgentIdx;
+}
+
+void
+nixlLibfabricEngine::handleHandshake(const std::string &peer_agent_name,
+                                      uint16_t assigned_idx) {
+    std::shared_ptr<nixlLibfabricConnection> conn;
+    {
+        std::lock_guard<std::mutex> lock(connection_state_mutex_);
+        auto it = connections_.find(peer_agent_name);
+        if (it != connections_.end() && it->second) {
+            conn = it->second;
+        }
+    }
+
+    if (!conn) {
+        // Race: peer's handshake won against our own loadRemoteConnInfo for
+        // them. Buffer the assignment so createAgentConnection picks it up
+        // when it adds the peer in a moment. Once we leave this function the
+        // peer is responsible for either (a) being added soon — which is the
+        // normal case — or (b) staying unknown forever, in which case we
+        // simply leak this small entry; that's fine.
+        std::lock_guard<std::mutex> plk(pending_handshake_mutex_);
+        pending_inbound_handshakes_[peer_agent_name] = assigned_idx;
+        NIXL_DEBUG << "Buffered handshake from not-yet-known peer '"
+                   << peer_agent_name << "' (assigned_idx=" << assigned_idx
+                   << "); will apply on createAgentConnection";
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> hlk(conn->handshake_mutex_);
+        conn->local_agent_idx_at_remote_ = assigned_idx;
+        conn->handshake_received_.store(true, std::memory_order_release);
+    }
+    conn->handshake_cv_.notify_all();
+    NIXL_INFO << "Handshake stored: peer='" << peer_agent_name
+              << "' assigned_idx=" << assigned_idx
+              << " — subsequent sends to them will encode this in imm_data.agent_idx";
 }
 
 /****************************************

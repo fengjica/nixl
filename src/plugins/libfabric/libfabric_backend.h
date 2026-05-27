@@ -121,6 +121,18 @@ private:
     size_t num_connected_rails_; // Number of successfully connected rails
     std::string initiator_addr_; // Local endpoint address
     std::string remote_addr_; // Remote endpoint address
+
+    // Handshake state. Populated when this peer sends us a
+    // NIXL_LIBFABRIC_MSG_HANDSHAKE telling us what index *they* have assigned
+    // to us in *their* agent_names_ table. We embed that value as the
+    // agent_idx field of every imm_data we ship them, so they can join
+    // pending_notifications_ on (sender_peer_idx, xfer_id) cleanly. Reads on
+    // the data path block on handshake_cv_ until handshake_received_ is true.
+    // The atomic gives lock-free fast-path checks for postXfer/notifSendPriv.
+    std::atomic<bool> handshake_received_{false};
+    uint16_t local_agent_idx_at_remote_ = 0; // valid only when handshake_received_
+    std::mutex handshake_mutex_;
+    std::condition_variable handshake_cv_;
 public:
     friend class nixlLibfabricEngine;
     friend class nixlLibfabricRail;
@@ -243,8 +255,34 @@ private:
               agent_name_length(0) {}
     };
 
-    // O(1) lookup with postXferID key
-    std::unordered_map<uint16_t, PendingNotification> pending_notifications_;
+    // O(1) lookup with composite key = (sender_peer_idx << 16) | notif_xfer_id.
+    // The peer_idx half of the key is the SENDER's local index in OUR
+    // agent_names_ table, which the sender learned via the handshake protocol
+    // (NIXL_LIBFABRIC_MSG_HANDSHAKE). The sender embeds that value as the
+    // agent_idx field of every imm_data, so we decode it directly from the
+    // completion and never go through the EFA AV reverse lookup that
+    // FI_SOURCE depends on. This is robust to EFA's aux-QP routing, which
+    // can otherwise yield FI_ADDR_NOTAVAIL on a fraction of completions in
+    // multi-rail deployments (efa_rdm_cq.c:200 explicit-AV-only lookup).
+    static inline uint64_t
+    makePendingKey(uint16_t sender_peer_idx, uint16_t notif_xfer_id) {
+        return (static_cast<uint64_t>(sender_peer_idx) << 16) | notif_xfer_id;
+    }
+    // Sentinel agent_idx value the sender ships when its handshake hasn't yet
+    // arrived from the receiver (or in synthetic single-process tests where
+    // there's no remote at all). Receiver maps it to a dedicated bucket so
+    // pre-handshake transfers don't collide with peer 0's entries. With
+    // proper blocking in postXfer/notifSendPriv this should rarely fire.
+    static constexpr uint16_t kPreHandshakeAgentIdx = 0xFF;
+    std::unordered_map<uint64_t, PendingNotification> pending_notifications_;
+
+    // Handshakes that arrived before the local createAgentConnection had
+    // registered the originator in connections_. Drained inside
+    // createAgentConnection so the connection's local_agent_idx_at_remote_
+    // is populated even if the inbound handshake won the race against our
+    // own loadRemoteConnInfo. Keyed by sender agent_name.
+    std::unordered_map<std::string, uint16_t> pending_inbound_handshakes_;
+    std::mutex pending_handshake_mutex_;
 
     // Connection management helpers
     nixl_status_t
@@ -283,9 +321,37 @@ private:
     progressThread();
 
 
-    // Engine message processing methods
+    // Engine message processing methods.
+    // sender_peer_idx is the SENDER's index in OUR agent_names_ table,
+    // decoded from the imm_data the sender shipped with the fi_senddata.
     void
-    processNotification(const std::string &serialized_notif);
+    processNotification(const std::string &serialized_notif, uint16_t sender_peer_idx);
+
+    // Send the per-peer handshake message to a peer we just inserted into the
+    // AV, telling them what index we have assigned them in our agent_names_.
+    // Called once at the end of createAgentConnection. Best-effort — failures
+    // are logged but don't block AV insertion.
+    nixl_status_t
+    sendHandshakeTo(const nixlLibfabricConnection &conn) const;
+
+    // Resolve the agent_idx the sender should ship to a given remote peer in
+    // every imm_data field. Returns the handshake-supplied value if available,
+    // blocking up to ~5 seconds for it to arrive. If the wait times out, falls
+    // back to kPreHandshakeAgentIdx and logs a warning — the receiver will
+    // route the entries into a single pre-handshake bucket, which is still
+    // safer than colliding with any real peer's bucket. Sending to ourselves
+    // (same-process self-connection) returns 0 immediately; same-agent
+    // transfers don't go through the imm_data demux path.
+    uint16_t
+    senderImmDataAgentIdx(nixlLibfabricConnection &conn) const;
+
+    // Called from processRecvCompletion when a NIXL_LIBFABRIC_MSG_HANDSHAKE
+    // arrives from a peer. Looks up the peer by agent_name (carried in the
+    // handshake payload) and stores the assigned index on its connection
+    // record, then notifies any postXfer/notifSendPriv blocked on
+    // handshake_cv_.
+    void
+    handleHandshake(const std::string &peer_agent_name, uint16_t assigned_idx);
     nixl_status_t
     loadMetadataHelper(const std::vector<uint64_t> &rail_keys,
                        void *buffer,
@@ -581,9 +647,12 @@ public:
      * Thread-safe method to track received data transfers.
      *
      * @param[in] xfer_id 16-bit transfer ID that was received
+     * @param[in] sender_peer_idx The SENDER's index in our agent_names_ table,
+     *            extracted from the imm_data the sender shipped. Combined with
+     *            xfer_id to form the pending_notifications_ join key.
      */
     void
-    addReceivedXferId(uint16_t xfer_id);
+    addReceivedXferId(uint16_t xfer_id, uint16_t sender_peer_idx);
 
     // Notification Queuing Helper Methods
     /**

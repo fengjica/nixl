@@ -75,6 +75,14 @@
 // Message type constants
 #define NIXL_LIBFABRIC_MSG_NOTIFICTION 2
 #define NIXL_LIBFABRIC_MSG_TRANSFER 4
+// Peer-id handshake message. Sent once per (peer A, peer B) pair, right after
+// connection setup completes on each side. Payload is a single uint8_t —
+// "the index I have assigned to you in MY agent_names_ table". The receiver
+// of the handshake stores this value on the connection record and uses it as
+// imm_data.agent_idx for every subsequent send/write back to the originator,
+// so the originator can join completions on its pending_notifications_ map by
+// (peer_idx, xfer_id) without trusting FI_SOURCE / EFA's reverse AV lookup.
+#define NIXL_LIBFABRIC_MSG_HANDSHAKE 8
 
 // Single-operation immediate data extraction (no intermediate shifts)
 #define NIXL_GET_MSG_TYPE_FROM_IMM(data) ((data) & NIXL_MSG_TYPE_MASK)
