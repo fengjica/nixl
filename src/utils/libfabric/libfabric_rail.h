@@ -329,7 +329,7 @@ public:
 
     /** Process completion queue with batching support */
     nixl_status_t
-    progressCompletionQueue() const;
+    progressCompletionQueue(bool lock_acquired = false, bool use_try_lock = true) const;
 
     // Callback registration methods
     /** Set callback for notification message processing */

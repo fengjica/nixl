@@ -1126,8 +1126,8 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
     }
 
     // Progress rails to kick off transfers
-    if (!progress_thread_enabled_) {
-        nixl_status_t progress_status = rail_manager.progressActiveRails();
+    {
+        nixl_status_t progress_status = rail_manager.progressActiveRails(false);
         if (progress_status != NIXL_SUCCESS && progress_status != NIXL_IN_PROG) {
             NIXL_ERROR << "Failed to progress rails in postXfer";
             return progress_status;
@@ -1157,8 +1157,8 @@ nixl_status_t
 nixlLibfabricEngine::checkXfer(nixlBackendReqH *handle) const {
     auto backend_handle = static_cast<nixlLibfabricBackendH *>(handle);
 
-    if (!progress_thread_enabled_) {
-        nixl_status_t progress_status = rail_manager.progressActiveRails();
+    {
+        nixl_status_t progress_status = rail_manager.progressActiveRails(false);
         if (progress_status != NIXL_SUCCESS && progress_status != NIXL_IN_PROG) {
             NIXL_ERROR << "Failed to progress rails in checkXfer";
             return progress_status;
@@ -1356,8 +1356,8 @@ nixlLibfabricEngine::notifSendPriv(const std::string &remote_agent,
         }
 
         // Progress rail 0 to ensure the message is sent
-        if (!progress_thread_enabled_) {
-            status = rail_manager.getRail(rail_id).progressCompletionQueue();
+        {
+            status = rail_manager.getRail(rail_id).progressCompletionQueue(false, false);
             if (status != NIXL_SUCCESS && status != NIXL_IN_PROG) {
                 NIXL_ERROR << "Failed to progress rail 0 in notifSendPriv";
                 return status;
@@ -1385,8 +1385,8 @@ nixlLibfabricEngine::genNotif(const std::string &remote_agent, const std::string
 
 nixl_status_t
 nixlLibfabricEngine::getNotifs(notif_list_t &notif_list) {
-    if (!progress_thread_enabled_) {
-        nixl_status_t progress_status = rail_manager.progressActiveRails();
+    {
+        nixl_status_t progress_status = rail_manager.progressActiveRails(false);
         if (progress_status != NIXL_SUCCESS && progress_status != NIXL_IN_PROG) {
             NIXL_ERROR << "Failed to progress rails in getNotifs";
             return progress_status;
@@ -1437,6 +1437,9 @@ nixlLibfabricEngine::progressThread() {
         }
         if (!any_completions) {
             std::this_thread::sleep_for(progress_thread_delay_);
+
+            //constexpr std::chrono::microseconds TEN_US{10};
+            //std::this_thread::sleep_for(TEN_US);
         }
     }
     NIXL_DEBUG << "PT: Thread exiting cleanly";
