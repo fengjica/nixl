@@ -1427,7 +1427,7 @@ nixlLibfabricEngine::progressThread() {
     while (!progress_thread_stop_.load()) {
         // Process completions only on rails (non-blocking)
         bool any_completions = false;
-        nixl_status_t status = rail_manager.progressActiveRails();
+        nixl_status_t status = rail_manager.progressActiveRails(true);
         if (status == NIXL_SUCCESS) {
             any_completions = true;
             NIXL_DEBUG << "PT: Processed completions on rails";
