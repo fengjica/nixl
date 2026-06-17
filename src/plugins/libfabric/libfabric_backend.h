@@ -140,6 +140,7 @@ public:
     uint32_t total_notif_msg_len; // Total length of notification message across all fragments
 
     std::vector<BinaryNotification> binary_notifs; // Vector of BinaryNotification for fragmentation
+    std::vector<bool> active_rails_; // Rails used by this transfer, for checkXfer pause
 
     nixlLibfabricBackendH(nixl_xfer_op_t op, const std::string &remote_agent);
     ~nixlLibfabricBackendH();

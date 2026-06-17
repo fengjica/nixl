@@ -27,6 +27,7 @@
 
 #include <numa.h>
 
+
 // Forward declaration for LibfabricUtils namespace
 namespace LibfabricUtils {
 uint16_t
@@ -1004,6 +1005,7 @@ nixlLibfabricRailManager::progressActiveRails(bool is_background) {
             rails_to_process.insert(rail_id);
         }
     }
+
 
     // Process rails without holding the lock
     bool any_completions = false;

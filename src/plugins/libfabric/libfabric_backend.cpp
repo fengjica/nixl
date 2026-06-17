@@ -1028,6 +1028,35 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
 
     size_t total_submitted = 0;
 
+    // Pause background polling on all rails used by this transfer.
+    // RAII guard resumes on any return path.
+    struct PollPauseGuard {
+        nixlLibfabricRailManager &mgr;
+        std::vector<bool> paused;
+        PollPauseGuard(nixlLibfabricRailManager &m, const nixl_meta_dlist_t &local, int desc_count)
+            : mgr(m), paused(m.getNumRails(), false) {
+            for (int i = 0; i < desc_count; ++i) {
+                auto *md = static_cast<nixlLibfabricPrivateMetadata *>(local[i].metadataP);
+                if (md) {
+                    for (size_t rid : md->selected_rails_) {
+                        if (!paused[rid]) {
+                            paused[rid] = true;
+                            mgr.getRail(rid).pauseBackgroundPoll();
+                        }
+                    }
+                }
+            }
+        }
+        ~PollPauseGuard() {
+            for (size_t rid = 0; rid < paused.size(); ++rid) {
+                if (paused[rid]) mgr.getRail(rid).resumeBackgroundPoll();
+            }
+        }
+    } poll_pause_guard(rail_manager, local, desc_count);
+
+    // Store active rails in the handle for checkXfer to use
+    backend_handle->active_rails_ = poll_pause_guard.paused;
+
     // Core transfer submission to process each descriptor with direct submission
     // Reserve base_offset once per transfer so all descriptors see a stable rail assignment
     const size_t xfer_base_offset = rail_manager.reserveBaseOffset();
@@ -1156,6 +1185,22 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
 nixl_status_t
 nixlLibfabricEngine::checkXfer(nixlBackendReqH *handle) const {
     auto backend_handle = static_cast<nixlLibfabricBackendH *>(handle);
+
+    // Pause background polling on rails used by this transfer for entire checkXfer
+    struct CheckPollGuard {
+        nixlLibfabricRailManager &mgr;
+        const std::vector<bool> &rails;
+        CheckPollGuard(nixlLibfabricRailManager &m, const std::vector<bool> &r) : mgr(m), rails(r) {
+            for (size_t i = 0; i < rails.size(); ++i) {
+                if (rails[i]) mgr.getRail(i).pauseBackgroundPoll();
+            }
+        }
+        ~CheckPollGuard() {
+            for (size_t i = 0; i < rails.size(); ++i) {
+                if (rails[i]) mgr.getRail(i).resumeBackgroundPoll();
+            }
+        }
+    } check_poll_guard(rail_manager, backend_handle->active_rails_);
 
     {
         nixl_status_t progress_status = rail_manager.progressActiveRails();
@@ -1305,6 +1350,16 @@ nixlLibfabricEngine::notifSendPriv(const std::string &remote_agent,
     NIXL_DEBUG << "Sending " << binary_notifications.size() << " notification fragments"
                << " total_message_length=" << total_message_length;
 
+    const size_t rail_id = 0;
+
+    // Pause background polling on rail 0 for the duration of notification sends
+    struct NotifPollGuard {
+        nixlLibfabricRailManager &mgr;
+        size_t rail_id;
+        NotifPollGuard(nixlLibfabricRailManager &m, size_t r) : mgr(m), rail_id(r) { mgr.getRail(rail_id).pauseBackgroundPoll(); }
+        ~NotifPollGuard() { mgr.getRail(rail_id).resumeBackgroundPoll(); }
+    } notif_poll_guard(rail_manager, rail_id);
+
     // Send each notification fragment
     for (size_t seq_id = 0; seq_id < binary_notifications.size(); ++seq_id) {
         auto &binary_notification = binary_notifications[seq_id];
@@ -1323,7 +1378,6 @@ nixlLibfabricEngine::notifSendPriv(const std::string &remote_agent,
         }
 
         // Allocate control request for this notification fragment from rail 0
-        size_t rail_id = 0;
         size_t max_size = BinaryNotification::MAX_FRAGMENT_SIZE;
         nixlLibfabricReq *control_request =
             rail_manager.getRail(rail_id).allocateControlRequest(max_size, notif_xfer_id);
