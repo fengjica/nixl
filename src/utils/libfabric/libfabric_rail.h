@@ -22,6 +22,7 @@
 #include <deque>
 #include <string>
 #include <functional>
+#include <atomic>
 #include <mutex>
 #include <ostream>
 #include <stack>
@@ -379,6 +380,10 @@ private:
 
     // EP mutex to protect endpoint and CQ operations
     mutable std::mutex ep_mutex_;
+
+    // Per-rail counter: incremented when data thread is actively using this rail's endpoint.
+    // Progress thread backs off (skips CQ poll) when non-zero.
+    mutable std::atomic<unsigned int> data_active_{0};
 
     // Whether a progress thread is handling CQ draining
     bool progress_thread_enabled_ = false;
