@@ -22,16 +22,8 @@
 #include "libfabric_common.h"
 
 #include <cstring>
-#include <optional>
 #include <stdexcept>
 #include <stack>
-
-// RAII guard: signals PT to back off this rail while data thread is active.
-struct RailActiveGuard {
-    std::atomic<unsigned int> &counter;
-    RailActiveGuard(std::atomic<unsigned int> &c) : counter(c) { counter.fetch_add(1, std::memory_order_relaxed); }
-    ~RailActiveGuard() { counter.fetch_sub(1, std::memory_order_relaxed); }
-};
 
 // RequestPool Base Class Implementation
 
@@ -720,7 +712,7 @@ nixlLibfabricRail::setXferIdCallback(std::function<void(uint32_t)> callback) {
 
 // Per-rail completion processing - handles one rail's CQ with configurable blocking behavior
 nixl_status_t
-nixlLibfabricRail::progressCompletionQueue(bool lock_acquired, bool use_try_lock) const {
+nixlLibfabricRail::progressCompletionQueue(bool lock_acquired, bool is_background) const {
     // Completion processing
     struct fi_cq_data_entry completions[NIXL_LIBFABRIC_CQ_BATCH_SIZE];
 
@@ -728,19 +720,13 @@ nixlLibfabricRail::progressCompletionQueue(bool lock_acquired, bool use_try_lock
 
     // Only protect libfabric CQ hardware operations
     {
-        // When data thread uses blocking lock, signal PT to back off this rail
-        std::optional<RailActiveGuard> rail_guard;
-        if (!lock_acquired && !use_try_lock) {
-            rail_guard.emplace(data_active_);
-        }
-
         std::unique_lock<std::mutex> ep_lock(ep_mutex_, std::defer_lock);
         if (!lock_acquired) {
             // Back off if data thread is actively using this rail
-            if (use_try_lock && data_active_.load(std::memory_order_relaxed) > 0) {
+            if (is_background && data_active_.load(std::memory_order_relaxed) > 0) {
                 return NIXL_IN_PROG;
             }
-            if (use_try_lock) {
+            if (is_background) {
                 if (!ep_lock.try_lock()) {
                     return NIXL_IN_PROG;
                 }
@@ -1064,8 +1050,6 @@ nixlLibfabricRail::postSend(uint64_t immediate_data,
                << " XFER_ID=" << NIXL_GET_XFER_ID_FROM_IMM(immediate_data)
                << " dest_addr=" << dest_addr << std::dec << " context=" << &req->ctx;
 
-    RailActiveGuard rail_guard(data_active_);
-
     // Retry indefinitely until senddata succeeds or fails for all providers
     int ret = -FI_EAGAIN;
     int attempt = 0;
@@ -1175,7 +1159,6 @@ nixlLibfabricRail::postWrite(const void *local_buffer,
     msg.context = &req->ctx;
     msg.data = immediate_data;
 
-    RailActiveGuard rail_guard(data_active_);
     nixl_status_t progress_status = NIXL_IN_PROG;
 
     while (true) {
@@ -1249,8 +1232,6 @@ nixlLibfabricRail::postRead(void *local_buffer,
                << " local_buffer=" << local_buffer << " length=" << length
                << " dest_addr=" << dest_addr << " remote_addr=" << (void *)remote_addr
                << " remote_key=" << remote_key << " context=" << &req->ctx;
-
-    RailActiveGuard rail_guard(data_active_);
 
     // Retry indefinitely until readdata succeeds or fails for all providers
     int ret = -FI_EAGAIN;

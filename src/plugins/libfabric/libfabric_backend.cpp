@@ -1127,7 +1127,7 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
 
     // Progress rails to kick off transfers
     {
-        nixl_status_t progress_status = rail_manager.progressActiveRails(false);
+        nixl_status_t progress_status = rail_manager.progressActiveRails();
         if (progress_status != NIXL_SUCCESS && progress_status != NIXL_IN_PROG) {
             NIXL_ERROR << "Failed to progress rails in postXfer";
             return progress_status;
@@ -1158,7 +1158,7 @@ nixlLibfabricEngine::checkXfer(nixlBackendReqH *handle) const {
     auto backend_handle = static_cast<nixlLibfabricBackendH *>(handle);
 
     {
-        nixl_status_t progress_status = rail_manager.progressActiveRails(false);
+        nixl_status_t progress_status = rail_manager.progressActiveRails();
         if (progress_status != NIXL_SUCCESS && progress_status != NIXL_IN_PROG) {
             NIXL_ERROR << "Failed to progress rails in checkXfer";
             return progress_status;
@@ -1357,7 +1357,7 @@ nixlLibfabricEngine::notifSendPriv(const std::string &remote_agent,
 
         // Progress rail 0 to ensure the message is sent
         {
-            status = rail_manager.getRail(rail_id).progressCompletionQueue(false, false);
+            status = rail_manager.getRail(rail_id).progressCompletionQueue();
             if (status != NIXL_SUCCESS && status != NIXL_IN_PROG) {
                 NIXL_ERROR << "Failed to progress rail 0 in notifSendPriv";
                 return status;
@@ -1386,7 +1386,7 @@ nixlLibfabricEngine::genNotif(const std::string &remote_agent, const std::string
 nixl_status_t
 nixlLibfabricEngine::getNotifs(notif_list_t &notif_list) {
     {
-        nixl_status_t progress_status = rail_manager.progressActiveRails(false);
+        nixl_status_t progress_status = rail_manager.progressActiveRails();
         if (progress_status != NIXL_SUCCESS && progress_status != NIXL_IN_PROG) {
             NIXL_ERROR << "Failed to progress rails in getNotifs";
             return progress_status;
@@ -1427,7 +1427,7 @@ nixlLibfabricEngine::progressThread() {
     while (!progress_thread_stop_.load()) {
         // Process completions only on rails (non-blocking)
         bool any_completions = false;
-        nixl_status_t status = rail_manager.progressActiveRails();
+        nixl_status_t status = rail_manager.progressActiveRails(true);
         if (status == NIXL_SUCCESS) {
             any_completions = true;
             NIXL_DEBUG << "PT: Processed completions on rails";

@@ -330,7 +330,14 @@ public:
 
     /** Process completion queue with batching support */
     nixl_status_t
-    progressCompletionQueue(bool lock_acquired = false, bool use_try_lock = true) const;
+    progressCompletionQueue(bool lock_acquired = false, bool is_background = false) const;
+
+    /** Pause background CQ polling on this rail. Increments a counter;
+     *  the progress thread backs off when non-zero. */
+    void pauseBackgroundPoll() const { data_active_.fetch_add(1, std::memory_order_relaxed); }
+
+    /** Resume background CQ polling on this rail. */
+    void resumeBackgroundPoll() const { data_active_.fetch_sub(1, std::memory_order_relaxed); }
 
     // Callback registration methods
     /** Set callback for notification message processing */
