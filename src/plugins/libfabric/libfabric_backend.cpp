@@ -922,6 +922,10 @@ nixlLibfabricEngine::prepXfer(const nixl_xfer_op_t &operation,
         return NIXL_ERR_NOT_FOUND;
     }
 
+    // Reset PT poll counters for this transfer
+    pt_useful_polls_.store(0, std::memory_order_relaxed);
+    pt_empty_polls_.store(0, std::memory_order_relaxed);
+
     auto backend_handle = new nixlLibfabricBackendH(operation, remote_agent);
     if (!backend_handle) {
         NIXL_ERROR << "Failed to allocate nixlLibfabricBackendH";
@@ -1167,6 +1171,11 @@ nixlLibfabricEngine::checkXfer(nixlBackendReqH *handle) const {
 
     // Then check for completions after processing any pending completions
     if (backend_handle->is_completed()) {
+        uint64_t useful = pt_useful_polls_.load(std::memory_order_relaxed);
+        uint64_t empty = pt_empty_polls_.load(std::memory_order_relaxed);
+        uint64_t total = useful + empty;
+        NIXL_INFO << "PT poll stats: useful=" << useful << " empty=" << empty
+                  << " total=" << total << " useful_ratio=" << (total > 0 ? useful * 100 / total : 0) << "%";
         NIXL_DEBUG << "Data transfer completed successfully";
         if (backend_handle->has_notif && backend_handle->operation_ == nixl_xfer_op_t::NIXL_READ) {
             nixl_status_t notif_status = notifSendPriv(backend_handle->remote_agent_,
@@ -1430,10 +1439,11 @@ nixlLibfabricEngine::progressThread() {
         nixl_status_t status = rail_manager.progressActiveRails();
         if (status == NIXL_SUCCESS) {
             any_completions = true;
-            NIXL_DEBUG << "PT: Processed completions on rails";
-        } else if (status != NIXL_IN_PROG && status != NIXL_SUCCESS) {
+            pt_useful_polls_.fetch_add(1, std::memory_order_relaxed);
+        } else if (status == NIXL_IN_PROG) {
+            pt_empty_polls_.fetch_add(1, std::memory_order_relaxed);
+        } else {
             NIXL_ERROR << "PT: Failed to process completions on rails";
-            // Don't return error, continue for robustness
         }
         if (!any_completions) {
             std::this_thread::sleep_for(progress_thread_delay_);
