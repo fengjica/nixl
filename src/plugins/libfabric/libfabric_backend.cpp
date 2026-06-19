@@ -21,6 +21,7 @@
 #include "common/configuration.h"
 #include "common/nixl_log.h"
 
+#include <cstdlib>
 #include <dlfcn.h>
 #include <limits>
 #include <cstring>
@@ -297,6 +298,11 @@ nixlLibfabricEngine::nixlLibfabricEngine(const nixlBackendInitParams *init_param
       runtime_(FI_HMEM_SYSTEM) {
 
     NIXL_INFO << "Initializing Libfabric Backend";
+
+    // Disable SHM when PT is enabled to allow FI_WAIT_FD on CQs (required by EFA)
+    if (progress_thread_enabled_) {
+        setenv("FI_EFA_ENABLE_SHM_TRANSFER", "0", 0 /* not overwite if explictly set by user*/);
+    }
 
     // this is required for loading rail selection policy by configuration
     if (rail_manager.init(getCustomParams()) != NIXL_SUCCESS) {
