@@ -476,16 +476,40 @@ nixlLibfabricRail::nixlLibfabricRail(const std::string &device,
         // Create CQ for this rail
         struct fi_cq_attr cq_attr = {};
         cq_attr.format = FI_CQ_FORMAT_DATA;
-        cq_attr.wait_obj = FI_WAIT_NONE;
         cq_attr.size = 12288;
-        ret = fi_cq_open(domain, &cq_attr, &cq, NULL);
-        if (ret) {
-            NIXL_ERROR << "fi_cq_open with FI_WAIT_NONE failed for rail " << rail_id << ": "
-                       << fi_strerror(-ret);
-            throw std::runtime_error("fi_cq_open with FI_WAIT_NONE failed for rail " +
-                                     std::to_string(rail_id));
+        cq_fd_ = -1;
+
+        // Try FI_WAIT_FD for epoll-based PT, fall back to FI_WAIT_NONE
+        if (progress_thread_enabled_) {
+            cq_attr.wait_obj = FI_WAIT_FD;
+            ret = fi_cq_open(domain, &cq_attr, &cq, NULL);
+            if (ret == 0) {
+                int fd_ret = fi_control(&cq->fid, FI_GETWAIT, &cq_fd_);
+                if (fd_ret == 0) {
+                    NIXL_INFO << "Rail " << rail_id << " CQ using FI_WAIT_FD, fd=" << cq_fd_;
+                } else {
+                    NIXL_WARN << "Rail " << rail_id << " FI_GETWAIT failed, falling back";
+                    fi_close(&cq->fid);
+                    cq = nullptr;
+                }
+            } else {
+                NIXL_WARN << "Rail " << rail_id << " FI_WAIT_FD open failed ("
+                          << fi_strerror(-ret) << "), falling back";
+                cq = nullptr;
+            }
         }
-        NIXL_TRACE << "fi_cq_open with FI_WAIT_NONE succeeded for rail " << rail_id;
+
+        if (!cq) {
+            cq_attr.wait_obj = FI_WAIT_NONE;
+            ret = fi_cq_open(domain, &cq_attr, &cq, NULL);
+            if (ret) {
+                NIXL_ERROR << "fi_cq_open with FI_WAIT_NONE failed for rail " << rail_id << ": "
+                           << fi_strerror(-ret);
+                throw std::runtime_error("fi_cq_open with FI_WAIT_NONE failed for rail " +
+                                         std::to_string(rail_id));
+            }
+            NIXL_TRACE << "fi_cq_open with FI_WAIT_NONE succeeded for rail " << rail_id;
+        }
 
         // Verify CQ was properly created
         if (!cq) {

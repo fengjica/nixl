@@ -25,6 +25,7 @@
 #include <limits>
 #include <cstring>
 #include <unistd.h>
+#include <sys/epoll.h>
 
 #include <iomanip>
 #include <numeric>
@@ -1419,25 +1420,84 @@ nixlLibfabricEngine::getNotifs(notif_list_t &notif_list) {
  * Progress Thread Function (Data Rails Only)
  *****************************************/
 
-// Progress thread that continuously processes completions only on rails
+// Progress thread that processes completions on rails.
+// Uses epoll to sleep when CQs are idle, then busy-drains until empty.
 nixl_status_t
 nixlLibfabricEngine::progressThread() {
     NIXL_DEBUG << "PT: Thread started successfully for rails only";
-    // Main progress loop - continuously process completions only on rails
-    while (!progress_thread_stop_.load()) {
-        // Process completions only on rails (non-blocking)
-        bool any_completions = false;
-        nixl_status_t status = rail_manager.progressActiveRails();
-        if (status == NIXL_SUCCESS) {
-            any_completions = true;
-            NIXL_DEBUG << "PT: Processed completions on rails";
-        } else if (status != NIXL_IN_PROG && status != NIXL_SUCCESS) {
-            NIXL_ERROR << "PT: Failed to process completions on rails";
-            // Don't return error, continue for robustness
+
+    // Setup epoll if all rails support FI_WAIT_FD
+    int epfd = -1;
+    bool use_epoll = true;
+    size_t num_rails = rail_manager.getNumRails();
+    for (size_t i = 0; i < num_rails; ++i) {
+        if (rail_manager.getRail(i).getCqFd() < 0) {
+            use_epoll = false;
+            break;
         }
-        if (!any_completions) {
+    }
+
+    if (use_epoll) {
+        epfd = epoll_create1(0);
+        if (epfd < 0) {
+            NIXL_WARN << "PT: epoll_create1 failed, falling back to busy-poll";
+            use_epoll = false;
+        } else {
+            for (size_t i = 0; i < num_rails; ++i) {
+                struct epoll_event ev = {};
+                ev.events = EPOLLIN;
+                ev.data.u64 = i;
+                if (epoll_ctl(epfd, EPOLL_CTL_ADD, rail_manager.getRail(i).getCqFd(), &ev) < 0) {
+                    NIXL_WARN << "PT: epoll_ctl ADD failed for rail " << i << ", falling back";
+                    close(epfd);
+                    epfd = -1;
+                    use_epoll = false;
+                    break;
+                }
+            }
+            if (use_epoll) {
+                NIXL_INFO << "PT: Using epoll mode with " << num_rails << " rail fds";
+            }
+        }
+    }
+
+    if (!use_epoll) {
+        NIXL_INFO << "PT: Using busy-poll mode";
+    }
+
+    // Main progress loop
+    constexpr int MAX_EPOLL_EVENTS = 64;
+    struct epoll_event events[MAX_EPOLL_EVENTS];
+
+    while (!progress_thread_stop_.load()) {
+        if (use_epoll) {
+            // Sleep until any CQ has completions (10ms timeout for shutdown check)
+            int nfds = epoll_wait(epfd, events, MAX_EPOLL_EVENTS, 10);
+            if (nfds <= 0) {
+                continue;
+            }
+        }
+
+        // Busy-drain: poll all rails until no more completions
+        while (!progress_thread_stop_.load()) {
+            nixl_status_t status = rail_manager.progressActiveRails();
+            if (status == NIXL_IN_PROG) {
+                break;  // CQs empty, go back to sleep (or outer loop)
+            } else if (status == NIXL_SUCCESS) {
+                NIXL_DEBUG << "PT: Processed completions on rails";
+            } else {
+                NIXL_ERROR << "PT: Failed to process completions on rails";
+                // Don't return error, continue for robustness
+            }
+        }
+
+        if (!use_epoll) {
             std::this_thread::sleep_for(progress_thread_delay_);
         }
+    }
+
+    if (epfd >= 0) {
+        close(epfd);
     }
     NIXL_DEBUG << "PT: Thread exiting cleanly";
     return NIXL_SUCCESS;

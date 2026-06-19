@@ -331,6 +331,9 @@ public:
     nixl_status_t
     progressCompletionQueue() const;
 
+    /** Get the CQ wait fd for epoll. Returns -1 if not supported. */
+    int getCqFd() const { return cq_fd_; }
+
     // Callback registration methods
     /** Set callback for notification message processing */
     void
@@ -382,6 +385,9 @@ private:
 
     // Whether a progress thread is handling CQ draining
     bool progress_thread_enabled_ = false;
+
+    // CQ wait fd for epoll-based progress thread (FI_WAIT_FD), -1 if unsupported
+    int cq_fd_ = -1;
 
     // Callback functions
     std::function<void(const std::string &)> notificationCallback;
