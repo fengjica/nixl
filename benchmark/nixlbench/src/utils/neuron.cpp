@@ -169,6 +169,8 @@ neuronMalloc(void **addr, size_t buffer_size, int devid) {
 
     std::lock_guard lock{allocation_tracker_mutex};
     allocation_tracker.emplace(*addr, std::move(ptr));
+    fprintf(stderr, "neuronMalloc: tracked VA=%p, size=%zu, devid=%d, tracker_size=%zu\n",
+            *addr, buffer_size, devid, allocation_tracker.size());
 
     return 0;
 }
@@ -178,21 +180,38 @@ neuronFree(void *addr) {
     if (!addr) return 0;
 
     std::lock_guard lock{allocation_tracker_mutex};
+    fprintf(stderr, "neuronFree: removing VA=%p, tracker_size_before=%zu\n",
+            addr, allocation_tracker.size());
     return allocation_tracker.erase(addr) - 1;
 }
 
 int
 neuronMemcpy(void *dest, const void *src, size_t count, neuronMemcpyKind kind) {
-    nrt_tensor *tensor = getTensorFromVA(kind == neuronMemcpyHostToDevice ? dest : src);
+    const void *device_addr = (kind == neuronMemcpyHostToDevice) ? dest : src;
+    nrt_tensor *tensor = getTensorFromVA(device_addr);
     if (tensor == nullptr) {
+        fprintf(stderr, "neuronMemcpy: getTensorFromVA(%p) returned nullptr "
+                        "(kind=%s, count=%zu, tracker_size=%zu)\n",
+                device_addr,
+                kind == neuronMemcpyHostToDevice ? "H2D" : "D2H",
+                count,
+                []() { std::lock_guard lock{allocation_tracker_mutex}; return allocation_tracker.size(); }());
         return -1;
     }
 
+    int status;
     if (kind == neuronMemcpyHostToDevice) {
-        return nrt_tensor_write(tensor, src, 0, count);
+        status = nrt_tensor_write(tensor, src, 0, count);
     } else {
-        return nrt_tensor_read(tensor, dest, 0, count);
+        status = nrt_tensor_read(tensor, dest, 0, count);
     }
+    if (status != 0) {
+        fprintf(stderr, "neuronMemcpy: %s failed with status %d "
+                        "(tensor=%p, device_addr=%p, count=%zu)\n",
+                kind == neuronMemcpyHostToDevice ? "nrt_tensor_write" : "nrt_tensor_read",
+                status, (void *)tensor, device_addr, count);
+    }
+    return status;
 }
 
 int
