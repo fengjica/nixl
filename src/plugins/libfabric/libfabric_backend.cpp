@@ -1174,7 +1174,7 @@ nixl_status_t
 nixlLibfabricEngine::checkXfer(nixlBackendReqH *handle) const {
     auto backend_handle = static_cast<nixlLibfabricBackendH *>(handle);
 
-    {
+    if (!progress_thread_enabled_) {
         nixl_status_t progress_status = rail_manager.progressActiveRails();
         if (progress_status != NIXL_SUCCESS && progress_status != NIXL_IN_PROG) {
             NIXL_ERROR << "Failed to progress rails in checkXfer";
