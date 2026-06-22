@@ -1174,21 +1174,6 @@ nixl_status_t
 nixlLibfabricEngine::checkXfer(nixlBackendReqH *handle) const {
     auto backend_handle = static_cast<nixlLibfabricBackendH *>(handle);
 
-    struct DataThreadGuard {
-        std::atomic<bool> &yield_flag;
-        std::atomic<unsigned int> &count;
-        DataThreadGuard(std::atomic<bool> &f, std::atomic<unsigned int> &c) : yield_flag(f), count(c) {
-            if (count.fetch_add(1, std::memory_order_relaxed) == 0) {
-                yield_flag.store(true, std::memory_order_relaxed);
-            }
-        }
-        ~DataThreadGuard() {
-            if (count.fetch_sub(1, std::memory_order_relaxed) == 1) {
-                yield_flag.store(false, std::memory_order_relaxed);
-            }
-        }
-    } data_thread_guard(pt_should_yield_, data_thread_count_);
-
     {
         nixl_status_t progress_status = rail_manager.progressActiveRails();
         if (progress_status != NIXL_SUCCESS && progress_status != NIXL_IN_PROG) {
