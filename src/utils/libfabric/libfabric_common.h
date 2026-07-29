@@ -46,6 +46,12 @@
 // Number of consecutive WRITE descriptors batched onto one rail with FI_MORE before flushing.
 #define NIXL_LIBFABRIC_FI_MORE_BATCH_SIZE 16
 
+// Size of the sliding window the posting loop looks ahead over when deciding whether a rail's
+// FI_MORE batch continues to the same remote endpoint. A batch is flushed at the last post to a
+// (rail, remote endpoint) pair within the window, so queued WQEs never wait longer than this many
+// descriptors for a doorbell. Larger retains more batching at the cost of a longer wait.
+#define NIXL_LIBFABRIC_FI_MORE_LOOKAHEAD 128
+
 // Request pool configuration constants
 #define NIXL_LIBFABRIC_CONTROL_REQUESTS_PER_RAIL 4096 // SEND/RECV operations (for notifications)
 #define NIXL_LIBFABRIC_DATA_REQUESTS_PER_RAIL 1024 // WRITE/READ operations

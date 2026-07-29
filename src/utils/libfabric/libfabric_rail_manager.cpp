@@ -418,7 +418,9 @@ nixlLibfabricRailManager::prepareAndSubmitTransfer(
         const size_t remote_ep_id = remote_selected_endpoints[railSelectionIndex(
             base_offset, desc_idx, batch_write, remote_selected_endpoints.size())];
         const uint64_t fi_flags = (batch_write && apply_fi_more) ? FI_MORE : 0;
-        NIXL_DEBUG << "rail " << rail_id << ", remote_ep_id " << remote_ep_id;
+        NIXL_DEBUG << "rail " << rail_id << ", remote_ep_id " << remote_ep_id << ", desc_idx "
+                   << desc_idx << ", base_offset " << base_offset << ", batch_write " << batch_write
+                   << ", FI_MORE " << ((fi_flags & FI_MORE) ? 1 : 0);
         // Allocate request
         nixlLibfabricReq *req = rails_[rail_id]->allocateDataRequest(op_type, xfer_id);
         if (!req) {
@@ -508,7 +510,8 @@ nixlLibfabricRailManager::prepareAndSubmitTransfer(
             const size_t rail_id = selected_rails[i];
             const size_t remote_ep_id =
                 remote_selected_endpoints[i % remote_selected_endpoints.size()];
-            NIXL_DEBUG << "rail " << rail_id << ", remote_ep_id=" << remote_ep_id;
+            NIXL_DEBUG << "rail " << rail_id << ", remote_ep_id=" << remote_ep_id
+                       << ", striped chunk " << i << "/" << num_rails << ", FI_MORE 0";
             size_t current_chunk_size = chunk_size + (i == num_rails - 1 ? remainder : 0);
             if (current_chunk_size == 0) {
                 break;

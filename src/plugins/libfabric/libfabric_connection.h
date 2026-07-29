@@ -39,10 +39,20 @@ struct nixlLibfabricConnection : public nixlBackendConnMD {
     nixl_status_t
     disconnect();
 
+    /** Number of endpoints the remote agent advertised at handshake, which bounds remote endpoint
+     *  ids. Every local rail inserted the same remote endpoint list, so all rows of
+     *  rail_remote_addr_list_ have this length and any one of them gives the count. May differ
+     *  from our local rail count. */
+    size_t
+    numRemoteEndpoints() const {
+        return rail_remote_addr_list_.at(0).size();
+    }
+
     size_t agent_index_; // Unique agent identifier in agent_names vector
     std::string remoteAgent_; // Remote agent name
-    std::unordered_map<size_t, std::vector<fi_addr_t>>
-        rail_remote_addr_list_; // Rail libfabric addresses. key=rail id.
+    // libfabric addresses of the remote agent's endpoints, one row per local rail: a given remote
+    // endpoint has a different fi_addr_t on each rail. Indexed [rail_id][remote_ep_id].
+    std::unordered_map<size_t, std::vector<fi_addr_t>> rail_remote_addr_list_;
     std::vector<char *> src_ep_names_; // Rail endpoint names
     std::atomic<ConnectionState> overall_state_; // Current connection state
 

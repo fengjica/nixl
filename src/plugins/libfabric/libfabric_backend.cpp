@@ -385,12 +385,19 @@ nixlLibfabricEngine::vramApplyCtxEx(bool &use_cuda_addr_wa) const {
  * Request Management
  *****************************************/
 
-nixlLibfabricBackendH::nixlLibfabricBackendH(nixl_xfer_op_t op, const std::string &remote_agent)
+nixlLibfabricBackendH::nixlLibfabricBackendH(nixl_xfer_op_t op,
+                                             const std::string &remote_agent,
+                                             size_t num_rails,
+                                             size_t num_remote_eps)
     : completed_requests_(0),
       submitted_requests_(0),
       operation_(op),
       remote_agent_(remote_agent),
-      total_notif_msg_len(0) {
+      total_notif_msg_len(0),
+      fi_more_window(NIXL_LIBFABRIC_FI_MORE_BATCH_SIZE,
+                     num_rails,
+                     num_remote_eps,
+                     NIXL_LIBFABRIC_FI_MORE_LOOKAHEAD) {
     // Initialize BinaryNotification vector
     binary_notifs.clear();
 
@@ -1129,7 +1136,7 @@ nixlLibfabricEngine::loadRemoteMD(const nixlBlobDesc &input,
     std::vector<uint64_t> remote_keys;
     uint64_t remote_addr;
     nixl_status_t status = rail_manager_.deserializeMemoryKeys(
-        input.metaInfo, conn->rail_remote_addr_list_.at(0).size(), remote_keys, remote_addr);
+        input.metaInfo, conn->numRemoteEndpoints(), remote_keys, remote_addr);
     if (status != NIXL_SUCCESS) {
         NIXL_ERROR << "Rail Manager deserializeMemoryKeys failed";
         return status;
@@ -1174,6 +1181,7 @@ nixlLibfabricEngine::prepXfer(const nixl_xfer_op_t &operation,
                               const nixl_opt_b_args_t *opt_args) const {
     NIXL_DEBUG << "Preparing transfer for remote_agent: " << remote_agent;
 
+    std::shared_ptr<nixlLibfabricConnection> conn;
     {
         std::lock_guard<std::mutex> lock(connection_state_mutex_);
         auto conn_it = connections_.find(remote_agent);
@@ -1181,9 +1189,13 @@ nixlLibfabricEngine::prepXfer(const nixl_xfer_op_t &operation,
             NIXL_ERROR << "No valid connection found for agent: " << remote_agent;
             return NIXL_ERR_NOT_FOUND;
         }
+        conn = conn_it->second;
     }
 
-    auto backend_handle = new nixlLibfabricBackendH(operation, remote_agent);
+    // Remote endpoint ids index this agent's key list, which is sized by the endpoints the remote
+    // agent advertised at handshake -- not by our rail count, which may differ.
+    auto backend_handle = new nixlLibfabricBackendH(
+        operation, remote_agent, rail_manager_.getNumRails(), conn->numRemoteEndpoints());
     if (!backend_handle) {
         NIXL_ERROR << "Failed to allocate nixlLibfabricBackendH";
         return NIXL_ERR_BACKEND;
@@ -1240,21 +1252,19 @@ nixlLibfabricEngine::batchingRail(const nixl_meta_dlist_t &local,
         xfer_base_offset, desc_idx, /*batch_write=*/true, md->selected_rails_.size())];
 }
 
-bool
-nixlLibfabricEngine::useFiMore(int desc_idx,
-                               int rail_id,
-                               const std::vector<int> &last_desc_idx_per_rail,
-                               std::vector<int> &posts_since_flush) const {
-    if (rail_id < 0) {
-        return false;
+int
+nixlLibfabricEngine::batchingRemoteEp(const nixl_meta_dlist_t &remote,
+                                      int desc_idx,
+                                      size_t xfer_base_offset) const {
+    auto *md = static_cast<nixlLibfabricPublicMetadata *>(remote[desc_idx].metadataP);
+    if (!md || md->remote_selected_endpoints_.empty()) {
+        return -1;
     }
-    if (desc_idx == last_desc_idx_per_rail[rail_id] ||
-        posts_since_flush[rail_id] == NIXL_LIBFABRIC_FI_MORE_BATCH_SIZE - 1) {
-        posts_since_flush[rail_id] = 0;
-        return false;
-    }
-    ++posts_since_flush[rail_id];
-    return true;
+    // The remote endpoint round-robins over its own count, which can differ from the local rail
+    // count, so a rail's batch can move to a different endpoint mid-batch. Must agree with the
+    // selection in prepareAndSubmitTransfer, hence the shared railSelectionIndex.
+    return (int)md->remote_selected_endpoints_[nixlLibfabricRailManager::railSelectionIndex(
+        xfer_base_offset, desc_idx, /*batch_write=*/true, md->remote_selected_endpoints_.size())];
 }
 
 nixl_status_t
@@ -1287,28 +1297,44 @@ nixlLibfabricEngine::postXferDescriptors(nixlLibfabricReq::OpType op_type,
 #endif
 
     // A FI_MORE post rings no doorbell; a rail's queued batch is only submitted by a later
-    // non-FI_MORE post on the same rail. Rails are resolved per-buffer, so descriptors of one
-    // round-robin group can land on different rails: every rail this chunk touches must have its
-    // last post flushed, or its batch would never be submitted.
+    // non-FI_MORE post on the same rail. Rails and remote endpoints are resolved per-descriptor
+    // and round-robin over counts that can differ, so a rail's batch can both move to a different
+    // endpoint and end at any point in the chunk. A lookahead window carried alongside the posting
+    // loop tracks the last descriptor per (rail, endpoint) pair, and each such post is flushed --
+    // so no batch waits more than NIXL_LIBFABRIC_FI_MORE_LOOKAHEAD descriptors for its doorbell.
     // allow_fi_more is false on the thread-pool path: chunks on other threads can interleave
     // posts on the same rail, so a per-chunk walk cannot know a rail's true last post there.
     const bool batch_writes = allow_fi_more && op_type == nixlLibfabricReq::WRITE;
 
-    std::vector<int> last_desc_idx_per_rail(rail_manager_.getNumRails(), -1);
-    std::vector<int> posts_since_flush(rail_manager_.getNumRails(), 0);
+    FiMoreWindow &window = backend_handle->fi_more_window;
+    auto admit = [this, &window, &local, &remote, xfer_base_offset](int desc_idx) {
+        const int rail_id = batchingRail(local, desc_idx, xfer_base_offset);
+        const int remote_ep_id =
+            rail_id < 0 ? -1 : batchingRemoteEp(remote, desc_idx, xfer_base_offset);
+        window.addAhead(desc_idx, rail_id, remote_ep_id);
+    };
+
     if (batch_writes) {
-        for (int i = start_idx; i < end_idx; ++i) {
-            const int rail_id = batchingRail(local, i, xfer_base_offset);
-            if (rail_id >= 0) {
-                last_desc_idx_per_rail[rail_id] = i;
-            }
+        window.reset();
+        // Fill all but the last slot before posting starts, leaving each iteration below exactly
+        // one descriptor to admit at the horizon and one to consume.
+        const int primed_end = std::min(end_idx, start_idx + NIXL_LIBFABRIC_FI_MORE_LOOKAHEAD);
+        for (int desc_idx = start_idx; desc_idx < primed_end; ++desc_idx) {
+            admit(desc_idx);
         }
     }
 
     for (int desc_idx = start_idx; desc_idx < end_idx; ++desc_idx) {
-        const int rail_id = batch_writes ? batchingRail(local, desc_idx, xfer_base_offset) : -1;
-        const bool apply_fi_more =
-            useFiMore(desc_idx, rail_id, last_desc_idx_per_rail, posts_since_flush);
+        bool apply_fi_more = false;
+        if (batch_writes) {
+            // The window already holds through desc_idx + lookahead - 1, so only the descriptor
+            // arriving at the horizon is missing.
+            const int arriving = desc_idx + NIXL_LIBFABRIC_FI_MORE_LOOKAHEAD;
+            if (arriving < end_idx) {
+                admit(arriving);
+            }
+            apply_fi_more = window.useFiMore(desc_idx);
+        }
 
         auto *local_md = static_cast<nixlLibfabricPrivateMetadata *>(local[desc_idx].metadataP);
         auto *remote_md = static_cast<nixlLibfabricPublicMetadata *>(remote[desc_idx].metadataP);

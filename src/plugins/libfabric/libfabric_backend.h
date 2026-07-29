@@ -37,6 +37,7 @@
 #include "libfabric/libfabric_rail_manager.h"
 #include "libfabric/libfabric_common.h"
 #include "libfabric_connection.h"
+#include "libfabric_fi_more_window.h"
 
 #ifdef HAVE_CUDA
 #include <cuda.h>
@@ -124,7 +125,17 @@ public:
 
     std::vector<BinaryNotification> binary_notifs; // Vector of BinaryNotification for fragmentation
 
-    nixlLibfabricBackendH(nixl_xfer_op_t op, const std::string &remote_agent);
+    // Lookahead window for FI_MORE batching, reused across reposts of this handle. Only touched on
+    // the single-threaded WRITE post path (postXferDescriptors with allow_fi_more), which reset()s
+    // it before each pass.
+    FiMoreWindow fi_more_window;
+
+    /** @param num_rails      local rail count, bounding rail ids
+     *  @param num_remote_eps endpoint count the remote agent advertised, bounding endpoint ids */
+    nixlLibfabricBackendH(nixl_xfer_op_t op,
+                          const std::string &remote_agent,
+                          size_t num_rails,
+                          size_t num_remote_eps);
     ~nixlLibfabricBackendH();
 
     /** Check if all requests in this transfer have completed */
@@ -337,14 +348,10 @@ private:
     int
     batchingRail(const nixl_meta_dlist_t &local, int desc_idx, size_t xfer_base_offset) const;
 
-    /** Whether descriptor desc_idx should carry FI_MORE: false (flush) for a rail's last post
-     *  in [start,end) and when the rail's batch reaches NIXL_LIBFABRIC_FI_MORE_BATCH_SIZE.
-     *  Updates posts_since_flush. */
-    bool
-    useFiMore(int desc_idx,
-              int rail_id,
-              const std::vector<int> &last_desc_idx_per_rail,
-              std::vector<int> &posts_since_flush) const;
+    /** Remote endpoint a WRITE descriptor posts to, or -1 if it has no remote endpoints. Round
+     *  robins over its own count, which can differ from the rail count. */
+    int
+    batchingRemoteEp(const nixl_meta_dlist_t &remote, int desc_idx, size_t xfer_base_offset) const;
 
 #ifdef HAVE_CUDA
     // CUDA context management methods

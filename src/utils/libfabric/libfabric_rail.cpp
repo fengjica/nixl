@@ -910,6 +910,9 @@ nixlLibfabricRail::processLocalTransferCompletion(struct fi_cq_data_entry *comp,
     // Find the request from context to access the completion callback
     nixlLibfabricReq *req = findRequestFromContext(comp->op_context);
     if (req && req->in_use) { // Only process if request is still valid and in use
+        NIXL_DEBUG << "Completion reaped: " << operation_type << " rail " << rail_id
+                   << " XFER_ID=" << req->xfer_id << " req_ptr=" << req
+                   << " len=" << req->chunk_size;
         // Call completion callback if it exists
         if (req->completion_callback) {
             NIXL_TRACE << "Calling completion callback for " << operation_type << " request "
