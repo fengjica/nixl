@@ -1370,6 +1370,21 @@ nixlLibfabricEngine::postXferDescriptors(nixlLibfabricReq::OpType op_type,
         submitted_count += desc_submitted_count;
     }
 
+    // A FI_MORE post rings no doorbell, so any rail still holding posts_since_flush > 0 here has
+    // a queued batch that this chunk never flushed. Nothing later in this call will submit it.
+    if (batch_writes) {
+        for (size_t r = 0; r < posts_since_flush.size(); ++r) {
+            if (posts_since_flush[r] > 0) {
+                NIXL_ERROR << "FI_MORE STRANDED BATCH: rail " << r << " has "
+                           << posts_since_flush[r]
+                           << " posts queued with FI_MORE and never flushed at end of ["
+                           << start_idx << "," << end_idx << ") XFER_ID="
+                           << backend_handle->post_xfer_id
+                           << " base_offset=" << xfer_base_offset;
+            }
+        }
+    }
+
     return NIXL_SUCCESS;
 }
 
