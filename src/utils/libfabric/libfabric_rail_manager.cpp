@@ -497,8 +497,10 @@ nixlLibfabricRailManager::prepareAndSubmitTransfer(
         // Track submitted request
         submitted_count_out = 1;
 
+        // req_ptr joins this post to its completion line, which already logs req_ptr. The
+        // immediately preceding line has this post's desc_idx and remote_ep_id.
         NIXL_DEBUG << "Round-robin: submitted single request on rail " << rail_id << " for "
-                   << transfer_size << " bytes, XFER_ID=" << req->xfer_id;
+                   << transfer_size << " bytes, XFER_ID=" << req->xfer_id << " req_ptr=" << req;
 
     } else {
         // Striping: distribute across multiple rails (no FI_MORE for striped transfers)
