@@ -273,7 +273,7 @@ TEST_F(telemetryTest, AddXferStatsRxBranch) {
 TEST_F(telemetryTest, TelemetryEventStructure) {
     nixlTelemetryEvent event1(nixl_telemetry_event_type_t::AGENT_TX_BYTES, 42);
 
-    EXPECT_EQ(TELEMETRY_VERSION, 4);
+    EXPECT_EQ(TELEMETRY_VERSION, 5);
     EXPECT_EQ(sizeof(nixlTelemetryEvent), 16);
     EXPECT_EQ(event1.value_, 42);
     EXPECT_EQ(event1.eventType_, nixl_telemetry_event_type_t::AGENT_TX_BYTES);
@@ -301,6 +301,57 @@ TEST(telemetryMetricContract, DescriptorIsUnifiedExporterSeriesContract) {
          "agent_memory_deregistered_last_bytes"},
         {et::AGENT_XFER_TIME, "agent_xfer_time_total", "agent_xfer_time"},
         {et::AGENT_XFER_POST_TIME, "agent_xfer_post_time_total", "agent_xfer_post_time"},
+        {et::AGENT_POST_PHASE_CONN_LOOKUP,
+         "agent_post_phase_conn_lookup_ns_total",
+         "agent_post_phase_conn_lookup_ns"},
+        {et::AGENT_POST_PHASE_NOTIF_PREP,
+         "agent_post_phase_notif_prep_ns_total",
+         "agent_post_phase_notif_prep_ns"},
+        {et::AGENT_POST_PHASE_MD_VALIDATE,
+         "agent_post_phase_md_validate_ns_total",
+         "agent_post_phase_md_validate_ns"},
+        {et::AGENT_POST_PHASE_FI_MORE_PREPASS,
+         "agent_post_phase_fi_more_prepass_ns_total",
+         "agent_post_phase_fi_more_prepass_ns"},
+        {et::AGENT_POST_PHASE_SUBMIT_LOOP,
+         "agent_post_phase_submit_loop_ns_total",
+         "agent_post_phase_submit_loop_ns"},
+        {et::AGENT_POST_PHASE_NOTIF_SEND,
+         "agent_post_phase_notif_send_ns_total",
+         "agent_post_phase_notif_send_ns"},
+        {et::AGENT_POST_PHASE_PROGRESS_TAIL,
+         "agent_post_phase_progress_tail_ns_total",
+         "agent_post_phase_progress_tail_ns"},
+        {et::AGENT_POST_ACCUM_RAIL_SELECT,
+         "agent_post_accum_rail_select_ns_total",
+         "agent_post_accum_rail_select_ns"},
+        {et::AGENT_POST_ACCUM_REQ_ALLOC,
+         "agent_post_accum_req_alloc_ns_total",
+         "agent_post_accum_req_alloc_ns"},
+        {et::AGENT_POST_ACCUM_FI_WRITEMSG,
+         "agent_post_accum_fi_writemsg_ns_total",
+         "agent_post_accum_fi_writemsg_ns"},
+        {et::AGENT_POST_ACCUM_EAGAIN_DRAIN,
+         "agent_post_accum_eagain_drain_ns_total",
+         "agent_post_accum_eagain_drain_ns"},
+        {et::AGENT_POST_ACCUM_CUDA_CTX,
+         "agent_post_accum_cuda_ctx_ns_total",
+         "agent_post_accum_cuda_ctx_ns"},
+        {et::AGENT_POST_PHASE_CALIBRATION,
+         "agent_post_phase_calibration_ns_total",
+         "agent_post_phase_calibration_ns"},
+        {et::AGENT_POST_EAGAIN_ATTEMPTS,
+         "agent_post_eagain_attempts_total",
+         "agent_post_eagain_attempts"},
+        {et::AGENT_POST_EAGAIN_MAX_ATTEMPTS,
+         "agent_post_eagain_max_attempts_total",
+         "agent_post_eagain_max_attempts"},
+        {et::AGENT_POST_SUBMITTED_REQUESTS,
+         "agent_post_submitted_requests_total",
+         "agent_post_submitted_requests"},
+        {et::AGENT_POST_RAILS_TOUCHED,
+         "agent_post_rails_touched_total",
+         "agent_post_rails_touched"},
         {et::AGENT_TELEMETRY_EVENTS_DROPPED, "agent_telemetry_events_dropped_total", nullptr},
     };
 
@@ -322,6 +373,25 @@ TEST(telemetryMetricContract, DescriptorIsUnifiedExporterSeriesContract) {
         ASSERT_NE(descriptor.counterName, nullptr);
         const std::string counter(descriptor.counterName);
         EXPECT_EQ(counter.substr(counter.size() - std::string("_total").size()), "_total");
+    }
+
+    // The bucket bounds every exporter registers are microseconds
+    // (NIXL_TELEMETRY_HISTOGRAM_BUCKETS_US), so a histogram's series name must
+    // agree with the factor that scales its raw values into that unit: a
+    // nanosecond-valued event needs 0.001, or its observations land 1000x off.
+    for (const auto type : telemetry_metric_event_types) {
+        const auto descriptor = nixlEnumStrings::telemetryMetricDescriptor(type);
+        if (descriptor.histogramName == nullptr) {
+            continue;
+        }
+        const std::string histogram(descriptor.histogramName);
+        ASSERT_EQ(histogram.substr(histogram.size() - std::string("_us").size()), "_us")
+            << histogram << ": histograms are published in microseconds";
+        ASSERT_NE(descriptor.counterName, nullptr);
+        const std::string counter(descriptor.counterName);
+        const bool counts_nanoseconds = counter.find("_ns_") != std::string::npos;
+        EXPECT_DOUBLE_EQ(descriptor.histogramScaleToUs, counts_nanoseconds ? 0.001 : 1.0)
+            << histogram << ": scale disagrees with the unit its counter reports";
     }
 
     for (const auto type : telemetry_error_event_types) {

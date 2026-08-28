@@ -226,19 +226,24 @@ storeWriter::setGauge(nixl_telemetry_event_type_t type, uint64_t value) noexcept
 void
 storeWriter::observeHistogram(nixl_telemetry_event_type_t type, uint64_t value) noexcept {
     const auto idx = static_cast<std::size_t>(type);
+    const auto descriptor = nixlEnumStrings::telemetryMetricDescriptor(type);
     // Same predicate the reader uses to build MP_STORE_HISTOGRAM_SLOTS, so a slot
     // can never be written without being read back.
-    if (idx >= MP_STORE_SLOT_COUNT ||
-        nixlEnumStrings::telemetryMetricDescriptor(type).histogramName == nullptr) {
+    if (idx >= MP_STORE_SLOT_COUNT || descriptor.histogramName == nullptr) {
         return;
     }
     auto *layout = static_cast<storeLayout *>(mapping_.get());
     const double *const first = layout->bucketBounds;
     const double *const last = first + layout->bucketCount;
+    // The bounds are microseconds, so an event carrying another unit (the
+    // nanosecond AGENT_POST_* phases) is scaled before being placed. histSums
+    // below keeps the raw value: an integer sum stays exact in the native unit,
+    // and mp_collector applies the same factor when it renders _sum.
+    const double scaled = static_cast<double>(value) * descriptor.histogramScaleToUs;
     // lower_bound, not upper_bound: Prometheus buckets are `value <= le`, so the
     // observation belongs in the first bucket whose bound is not below it. Values
     // above every bound land in the trailing overflow slot.
-    const double *const bound = std::lower_bound(first, last, static_cast<double>(value));
+    const double *const bound = std::lower_bound(first, last, scaled);
     __atomic_fetch_add(
         &layout->histBuckets[idx][static_cast<std::size_t>(bound - first)], 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&layout->histSums[idx], value, __ATOMIC_RELAXED);

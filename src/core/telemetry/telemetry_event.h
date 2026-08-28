@@ -27,7 +27,9 @@ constexpr char TELEMETRY_BUFFER_SIZE_VAR[] = "NIXL_TELEMETRY_BUFFER_SIZE";
 constexpr char TELEMETRY_RUN_INTERVAL_VAR[] = "NIXL_TELEMETRY_RUN_INTERVAL";
 constexpr char TELEMETRY_ENABLED_METRICS_VAR[] = "NIXL_TELEMETRY_ENABLED_METRICS";
 
-constexpr inline int TELEMETRY_VERSION = 4;
+// Bumped 4 -> 5 when the postXfer-path profiling events were inserted ahead of
+// AGENT_TELEMETRY_EVENTS_DROPPED, which changed that enumerator's wire value.
+constexpr inline int TELEMETRY_VERSION = 5;
 
 /**
  * @enum nixl_telemetry_event_type_t
@@ -54,8 +56,47 @@ enum class nixl_telemetry_event_type_t : uint32_t {
     AGENT_ERR_REMOTE_DISCONNECT = 17,
     AGENT_ERR_CANCELED = 18,
     AGENT_ERR_NO_TELEMETRY = 19,
-    AGENT_TELEMETRY_EVENTS_DROPPED = 20,
+
+    // --- postXfer-path profiling (docs/profiling-postxfer-telemetry.md) ---
+    // Produced by backends via nixlBackendEngine::drainPostPhaseSamples() and
+    // published once per posted transfer. All timing events below carry
+    // NANOSECONDS, not microseconds: the phases being resolved are individually
+    // sub-microsecond, so a us-truncated integer would read as zero. The
+    // exporters scale them into the shared microsecond histogram buckets via
+    // nixlTelemetryMetricDescriptor::histogramScaleToUs.
+    //
+    // Phases timed once per postXfer, outside the per-descriptor loop.
+    AGENT_POST_PHASE_CONN_LOOKUP = 20,
+    AGENT_POST_PHASE_NOTIF_PREP = 21,
+    AGENT_POST_PHASE_MD_VALIDATE = 22,
+    AGENT_POST_PHASE_FI_MORE_PREPASS = 23,
+    AGENT_POST_PHASE_SUBMIT_LOOP = 24,
+    AGENT_POST_PHASE_NOTIF_SEND = 25,
+    AGENT_POST_PHASE_PROGRESS_TAIL = 26,
+    // Per-descriptor costs summed across the loop, emitted once per postXfer.
+    AGENT_POST_ACCUM_RAIL_SELECT = 27,
+    AGENT_POST_ACCUM_REQ_ALLOC = 28,
+    AGENT_POST_ACCUM_FI_WRITEMSG = 29,
+    AGENT_POST_ACCUM_EAGAIN_DRAIN = 30,
+    AGENT_POST_ACCUM_CUDA_CTX = 31,
+    // Cost of the instrumentation harness itself, measured over a zero-length
+    // region. Subtract it from every other phase in the same run.
+    AGENT_POST_PHASE_CALIBRATION = 32,
+    // Unitless counters: no timestamps taken, so these stay affordable unsampled.
+    AGENT_POST_EAGAIN_ATTEMPTS = 33,
+    AGENT_POST_EAGAIN_MAX_ATTEMPTS = 34,
+    AGENT_POST_SUBMITTED_REQUESTS = 35,
+    AGENT_POST_RAILS_TOUCHED = 36,
+
+    AGENT_TELEMETRY_EVENTS_DROPPED = 37,
 };
+
+// Number of AGENT_POST_* profiling events, and the value of the first one. The
+// backend-side sample block is indexed by (event - first), so these two must
+// stay in step with the enum block above.
+inline constexpr std::size_t nixl_post_phase_event_count = 17;
+inline constexpr nixl_telemetry_event_type_t nixl_post_phase_first_event =
+    nixl_telemetry_event_type_t::AGENT_POST_PHASE_CONN_LOOKUP;
 
 inline constexpr std::size_t nixl_telemetry_event_type_count =
     static_cast<std::size_t>(nixl_telemetry_event_type_t::AGENT_TELEMETRY_EVENTS_DROPPED) + 1;
@@ -90,6 +131,23 @@ inline constexpr std::array telemetry_metric_event_types = {
     nixl_telemetry_event_type_t::AGENT_MEMORY_DEREGISTERED,
     nixl_telemetry_event_type_t::AGENT_XFER_TIME,
     nixl_telemetry_event_type_t::AGENT_XFER_POST_TIME,
+    nixl_telemetry_event_type_t::AGENT_POST_PHASE_CONN_LOOKUP,
+    nixl_telemetry_event_type_t::AGENT_POST_PHASE_NOTIF_PREP,
+    nixl_telemetry_event_type_t::AGENT_POST_PHASE_MD_VALIDATE,
+    nixl_telemetry_event_type_t::AGENT_POST_PHASE_FI_MORE_PREPASS,
+    nixl_telemetry_event_type_t::AGENT_POST_PHASE_SUBMIT_LOOP,
+    nixl_telemetry_event_type_t::AGENT_POST_PHASE_NOTIF_SEND,
+    nixl_telemetry_event_type_t::AGENT_POST_PHASE_PROGRESS_TAIL,
+    nixl_telemetry_event_type_t::AGENT_POST_ACCUM_RAIL_SELECT,
+    nixl_telemetry_event_type_t::AGENT_POST_ACCUM_REQ_ALLOC,
+    nixl_telemetry_event_type_t::AGENT_POST_ACCUM_FI_WRITEMSG,
+    nixl_telemetry_event_type_t::AGENT_POST_ACCUM_EAGAIN_DRAIN,
+    nixl_telemetry_event_type_t::AGENT_POST_ACCUM_CUDA_CTX,
+    nixl_telemetry_event_type_t::AGENT_POST_PHASE_CALIBRATION,
+    nixl_telemetry_event_type_t::AGENT_POST_EAGAIN_ATTEMPTS,
+    nixl_telemetry_event_type_t::AGENT_POST_EAGAIN_MAX_ATTEMPTS,
+    nixl_telemetry_event_type_t::AGENT_POST_SUBMITTED_REQUESTS,
+    nixl_telemetry_event_type_t::AGENT_POST_RAILS_TOUCHED,
     nixl_telemetry_event_type_t::AGENT_TELEMETRY_EVENTS_DROPPED,
 };
 
@@ -109,6 +167,13 @@ struct nixlTelemetryMetricDescriptor {
     const char *gaugeHelp;
     const char *histogramName;
     const char *histogramHelp;
+    // Factor converting this event's raw value into the microseconds that the
+    // shared histogram bucket bounds (NIXL_TELEMETRY_HISTOGRAM_BUCKETS_US) are
+    // expressed in. Events already denominated in microseconds leave it at 1.0;
+    // the nanosecond-valued AGENT_POST_* phases set 0.001. Exporters must apply
+    // it before Observe(), otherwise ns values land 1000x off in us buckets.
+    // Only meaningful when histogramName != nullptr.
+    double histogramScaleToUs = 1.0;
 };
 
 namespace nixlEnumStrings {
@@ -155,6 +220,40 @@ telemetryEventTypeStr(const nixl_telemetry_event_type_t type) noexcept {
         return "agent_err_canceled";
     case nixl_telemetry_event_type_t::AGENT_ERR_NO_TELEMETRY:
         return "agent_err_no_telemetry";
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_CONN_LOOKUP:
+        return "agent_post_phase_conn_lookup";
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_NOTIF_PREP:
+        return "agent_post_phase_notif_prep";
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_MD_VALIDATE:
+        return "agent_post_phase_md_validate";
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_FI_MORE_PREPASS:
+        return "agent_post_phase_fi_more_prepass";
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_SUBMIT_LOOP:
+        return "agent_post_phase_submit_loop";
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_NOTIF_SEND:
+        return "agent_post_phase_notif_send";
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_PROGRESS_TAIL:
+        return "agent_post_phase_progress_tail";
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_RAIL_SELECT:
+        return "agent_post_accum_rail_select";
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_REQ_ALLOC:
+        return "agent_post_accum_req_alloc";
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_FI_WRITEMSG:
+        return "agent_post_accum_fi_writemsg";
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_EAGAIN_DRAIN:
+        return "agent_post_accum_eagain_drain";
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_CUDA_CTX:
+        return "agent_post_accum_cuda_ctx";
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_CALIBRATION:
+        return "agent_post_phase_calibration";
+    case nixl_telemetry_event_type_t::AGENT_POST_EAGAIN_ATTEMPTS:
+        return "agent_post_eagain_attempts";
+    case nixl_telemetry_event_type_t::AGENT_POST_EAGAIN_MAX_ATTEMPTS:
+        return "agent_post_eagain_max_attempts";
+    case nixl_telemetry_event_type_t::AGENT_POST_SUBMITTED_REQUESTS:
+        return "agent_post_submitted_requests";
+    case nixl_telemetry_event_type_t::AGENT_POST_RAILS_TOUCHED:
+        return "agent_post_rails_touched";
     case nixl_telemetry_event_type_t::AGENT_TELEMETRY_EVENTS_DROPPED:
         return "agent_telemetry_events_dropped";
     }
@@ -196,6 +295,23 @@ telemetryErrorStatusLabel(const nixl_telemetry_event_type_t type) noexcept {
     case nixl_telemetry_event_type_t::AGENT_MEMORY_DEREGISTERED:
     case nixl_telemetry_event_type_t::AGENT_XFER_TIME:
     case nixl_telemetry_event_type_t::AGENT_XFER_POST_TIME:
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_CONN_LOOKUP:
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_NOTIF_PREP:
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_MD_VALIDATE:
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_FI_MORE_PREPASS:
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_SUBMIT_LOOP:
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_NOTIF_SEND:
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_PROGRESS_TAIL:
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_RAIL_SELECT:
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_REQ_ALLOC:
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_FI_WRITEMSG:
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_EAGAIN_DRAIN:
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_CUDA_CTX:
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_CALIBRATION:
+    case nixl_telemetry_event_type_t::AGENT_POST_EAGAIN_ATTEMPTS:
+    case nixl_telemetry_event_type_t::AGENT_POST_EAGAIN_MAX_ATTEMPTS:
+    case nixl_telemetry_event_type_t::AGENT_POST_SUBMITTED_REQUESTS:
+    case nixl_telemetry_event_type_t::AGENT_POST_RAILS_TOUCHED:
     case nixl_telemetry_event_type_t::AGENT_TELEMETRY_EVENTS_DROPPED:
         return nullptr;
     }
@@ -274,6 +390,142 @@ telemetryMetricDescriptor(const nixl_telemetry_event_type_t type) noexcept {
                 "Post time of the last request",
                 "agent_xfer_post_time_us",
                 "Distribution of time from start to posting to the back-end, in microseconds"};
+    // postXfer-path profiling. Values are nanoseconds, so every row scales by
+    // 0.001 to reach the microsecond histogram buckets.
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_CONN_LOOKUP:
+        return {"agent_post_phase_conn_lookup_ns_total",
+                "Cumulative time in the postXfer connection lookup and state check",
+                "agent_post_phase_conn_lookup_ns",
+                "Connection lookup and state check of the last posted transfer",
+                "agent_post_phase_conn_lookup_us",
+                "Distribution of postXfer connection lookup time, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_NOTIF_PREP:
+        return {"agent_post_phase_notif_prep_ns_total",
+                "Cumulative time preparing/fragmenting the postXfer notification",
+                "agent_post_phase_notif_prep_ns",
+                "Notification preparation of the last posted transfer",
+                "agent_post_phase_notif_prep_us",
+                "Distribution of postXfer notification preparation time, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_MD_VALIDATE:
+        return {"agent_post_phase_md_validate_ns_total",
+                "Cumulative time in the postXfer metadata validation pre-pass",
+                "agent_post_phase_md_validate_ns",
+                "Metadata validation pre-pass of the last posted transfer",
+                "agent_post_phase_md_validate_us",
+                "Distribution of postXfer metadata validation time, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_FI_MORE_PREPASS:
+        return {"agent_post_phase_fi_more_prepass_ns_total",
+                "Cumulative time in the FI_MORE last-descriptor-per-rail pre-pass",
+                "agent_post_phase_fi_more_prepass_ns",
+                "FI_MORE pre-pass of the last posted transfer",
+                "agent_post_phase_fi_more_prepass_us",
+                "Distribution of FI_MORE pre-pass time, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_SUBMIT_LOOP:
+        return {"agent_post_phase_submit_loop_ns_total",
+                "Cumulative time in the postXfer per-descriptor submit loop",
+                "agent_post_phase_submit_loop_ns",
+                "Descriptor submit loop of the last posted transfer",
+                "agent_post_phase_submit_loop_us",
+                "Distribution of postXfer submit loop time, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_NOTIF_SEND:
+        return {"agent_post_phase_notif_send_ns_total",
+                "Cumulative time sending the postXfer notification",
+                "agent_post_phase_notif_send_ns",
+                "Notification send of the last posted transfer",
+                "agent_post_phase_notif_send_us",
+                "Distribution of postXfer notification send time, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_PROGRESS_TAIL:
+        return {"agent_post_phase_progress_tail_ns_total",
+                "Cumulative time in the inline completion-queue progress tail of postXfer",
+                "agent_post_phase_progress_tail_ns",
+                "Inline progress tail of the last posted transfer",
+                "agent_post_phase_progress_tail_us",
+                "Distribution of the postXfer inline progress tail, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_RAIL_SELECT:
+        return {"agent_post_accum_rail_select_ns_total",
+                "Cumulative rail-selection time summed over posted descriptors",
+                "agent_post_accum_rail_select_ns",
+                "Rail selection summed over the last posted transfer",
+                "agent_post_accum_rail_select_us",
+                "Distribution of per-transfer summed rail-selection time, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_REQ_ALLOC:
+        return {"agent_post_accum_req_alloc_ns_total",
+                "Cumulative request-pool allocation time summed over posted descriptors",
+                "agent_post_accum_req_alloc_ns",
+                "Request-pool allocation summed over the last posted transfer",
+                "agent_post_accum_req_alloc_us",
+                "Distribution of per-transfer summed request allocation time, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_FI_WRITEMSG:
+        return {"agent_post_accum_fi_writemsg_ns_total",
+                "Cumulative first-attempt fi_writemsg time summed over posted descriptors",
+                "agent_post_accum_fi_writemsg_ns",
+                "First-attempt fi_writemsg summed over the last posted transfer",
+                "agent_post_accum_fi_writemsg_us",
+                "Distribution of per-transfer summed fi_writemsg time, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_EAGAIN_DRAIN:
+        return {"agent_post_accum_eagain_drain_ns_total",
+                "Cumulative time draining completions inline after -FI_EAGAIN",
+                "agent_post_accum_eagain_drain_ns",
+                "Inline EAGAIN drain summed over the last posted transfer",
+                "agent_post_accum_eagain_drain_us",
+                "Distribution of per-transfer summed EAGAIN drain time, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_ACCUM_CUDA_CTX:
+        return {"agent_post_accum_cuda_ctx_ns_total",
+                "Cumulative CUDA context/device handling time on the post path",
+                "agent_post_accum_cuda_ctx_ns",
+                "CUDA context handling summed over the last posted transfer",
+                "agent_post_accum_cuda_ctx_us",
+                "Distribution of per-transfer summed CUDA context time, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_PHASE_CALIBRATION:
+        return {"agent_post_phase_calibration_ns_total",
+                "Cumulative measured cost of the profiling harness over a zero-length region",
+                "agent_post_phase_calibration_ns",
+                "Profiling harness cost measured during the last posted transfer",
+                "agent_post_phase_calibration_us",
+                "Distribution of the profiling harness cost, in microseconds",
+                0.001};
+    case nixl_telemetry_event_type_t::AGENT_POST_EAGAIN_ATTEMPTS:
+        return {"agent_post_eagain_attempts_total",
+                "Cumulative -FI_EAGAIN retry attempts on the post path",
+                "agent_post_eagain_attempts",
+                "-FI_EAGAIN retry attempts during the last posted transfer",
+                nullptr,
+                nullptr};
+    case nixl_telemetry_event_type_t::AGENT_POST_EAGAIN_MAX_ATTEMPTS:
+        // The per-post maximum is a gauge by nature; the counter accumulates
+        // those maxima so that rate() over the transfer rate gives their mean.
+        return {"agent_post_eagain_max_attempts_total",
+                "Cumulative sum of the per-transfer maximum -FI_EAGAIN retry count",
+                "agent_post_eagain_max_attempts",
+                "Highest -FI_EAGAIN retry count for any single descriptor of the last transfer",
+                nullptr,
+                nullptr};
+    case nixl_telemetry_event_type_t::AGENT_POST_SUBMITTED_REQUESTS:
+        return {"agent_post_submitted_requests_total",
+                "Cumulative descriptors submitted to the provider by postXfer",
+                "agent_post_submitted_requests",
+                "Descriptors submitted by the last posted transfer",
+                nullptr,
+                nullptr};
+    case nixl_telemetry_event_type_t::AGENT_POST_RAILS_TOUCHED:
+        return {"agent_post_rails_touched_total",
+                "Cumulative count of rails posted to, summed over transfers",
+                "agent_post_rails_touched",
+                "Distinct rails posted to by the last posted transfer",
+                nullptr,
+                nullptr};
     case nixl_telemetry_event_type_t::AGENT_TELEMETRY_EVENTS_DROPPED:
         return {"agent_telemetry_events_dropped_total",
                 "Cumulative telemetry events dropped at the producer-side staging queue",

@@ -99,9 +99,11 @@ private:
 
     struct HistogramEntry {
         HistogramEntry(prometheus::Family<prometheus::Histogram> *family,
-                       prometheus::Histogram *metric)
+                       prometheus::Histogram *metric,
+                       double scale_to_us)
             : family(family),
-              metric(metric) {}
+              metric(metric),
+              scaleToUs(scale_to_us) {}
 
         HistogramEntry(const HistogramEntry &) = delete;
         HistogramEntry &
@@ -117,6 +119,9 @@ private:
 
         prometheus::Family<prometheus::Histogram> *family = nullptr;
         prometheus::Histogram *metric = nullptr;
+        // Multiplier taking the raw event value into the microseconds the bucket
+        // bounds are expressed in. See nixlTelemetryMetricDescriptor.
+        double scaleToUs = 1.0;
     };
 
     const std::string agent_name_;
@@ -152,7 +157,8 @@ private:
     registerHistogram(nixl_telemetry_event_type_t event_type,
                       const std::string &metric_name,
                       const std::string &help,
-                      const std::vector<double> &buckets);
+                      const std::vector<double> &buckets,
+                      double scale_to_us);
 };
 
 #endif // NIXL_SRC_PLUGINS_TELEMETRY_PROMETHEUS_EXPORTER_H

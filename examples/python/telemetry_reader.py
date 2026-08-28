@@ -33,7 +33,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constants from telemetry_event.h
-TELEMETRY_VERSION = 4
+TELEMETRY_VERSION = 5
 
 # NIXL telemetry event types (nixl_telemetry_event_type_t)
 AGENT_TX_BYTES = 0
@@ -56,7 +56,27 @@ AGENT_ERR_NOT_SUPPORTED = 16
 AGENT_ERR_REMOTE_DISCONNECT = 17
 AGENT_ERR_CANCELED = 18
 AGENT_ERR_NO_TELEMETRY = 19
-AGENT_TELEMETRY_EVENTS_DROPPED = 20
+# postXfer-path profiling phases. Values are NANOSECONDS, unlike the
+# microsecond AGENT_XFER_*_TIME events above.
+AGENT_POST_PHASE_CONN_LOOKUP = 20
+AGENT_POST_PHASE_NOTIF_PREP = 21
+AGENT_POST_PHASE_MD_VALIDATE = 22
+AGENT_POST_PHASE_FI_MORE_PREPASS = 23
+AGENT_POST_PHASE_SUBMIT_LOOP = 24
+AGENT_POST_PHASE_NOTIF_SEND = 25
+AGENT_POST_PHASE_PROGRESS_TAIL = 26
+AGENT_POST_ACCUM_RAIL_SELECT = 27
+AGENT_POST_ACCUM_REQ_ALLOC = 28
+AGENT_POST_ACCUM_FI_WRITEMSG = 29
+AGENT_POST_ACCUM_EAGAIN_DRAIN = 30
+AGENT_POST_ACCUM_CUDA_CTX = 31
+AGENT_POST_PHASE_CALIBRATION = 32
+# Unitless counters.
+AGENT_POST_EAGAIN_ATTEMPTS = 33
+AGENT_POST_EAGAIN_MAX_ATTEMPTS = 34
+AGENT_POST_SUBMITTED_REQUESTS = 35
+AGENT_POST_RAILS_TOUCHED = 36
+AGENT_TELEMETRY_EVENTS_DROPPED = 37
 
 # Global flag for graceful shutdown
 running = True
@@ -240,6 +260,23 @@ _EVENT_TYPE_STRINGS = {
     AGENT_ERR_REMOTE_DISCONNECT: "agent_err_remote_disconnect",
     AGENT_ERR_CANCELED: "agent_err_canceled",
     AGENT_ERR_NO_TELEMETRY: "agent_err_no_telemetry",
+    AGENT_POST_PHASE_CONN_LOOKUP: "agent_post_phase_conn_lookup",
+    AGENT_POST_PHASE_NOTIF_PREP: "agent_post_phase_notif_prep",
+    AGENT_POST_PHASE_MD_VALIDATE: "agent_post_phase_md_validate",
+    AGENT_POST_PHASE_FI_MORE_PREPASS: "agent_post_phase_fi_more_prepass",
+    AGENT_POST_PHASE_SUBMIT_LOOP: "agent_post_phase_submit_loop",
+    AGENT_POST_PHASE_NOTIF_SEND: "agent_post_phase_notif_send",
+    AGENT_POST_PHASE_PROGRESS_TAIL: "agent_post_phase_progress_tail",
+    AGENT_POST_ACCUM_RAIL_SELECT: "agent_post_accum_rail_select",
+    AGENT_POST_ACCUM_REQ_ALLOC: "agent_post_accum_req_alloc",
+    AGENT_POST_ACCUM_FI_WRITEMSG: "agent_post_accum_fi_writemsg",
+    AGENT_POST_ACCUM_EAGAIN_DRAIN: "agent_post_accum_eagain_drain",
+    AGENT_POST_ACCUM_CUDA_CTX: "agent_post_accum_cuda_ctx",
+    AGENT_POST_PHASE_CALIBRATION: "agent_post_phase_calibration",
+    AGENT_POST_EAGAIN_ATTEMPTS: "agent_post_eagain_attempts",
+    AGENT_POST_EAGAIN_MAX_ATTEMPTS: "agent_post_eagain_max_attempts",
+    AGENT_POST_SUBMITTED_REQUESTS: "agent_post_submitted_requests",
+    AGENT_POST_RAILS_TOUCHED: "agent_post_rails_touched",
     AGENT_TELEMETRY_EVENTS_DROPPED: "agent_telemetry_events_dropped",
 }
 

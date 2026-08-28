@@ -415,8 +415,12 @@ nixlTelemetryDocaExporter::appendHistogramSample(const nixlTelemetryEvent &event
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     doca_telemetry_exporter_histogram_id_t histogram_id = 0;
+    // The bucket bounds registered above are microseconds; scale events carrying
+    // another unit (the nanosecond AGENT_POST_* phases) into them.
+    const double observed = static_cast<double>(event.value_) *
+        nixlEnumStrings::telemetryMetricDescriptor(event.eventType_).histogramScaleToUs;
     const doca_error_t result = doca_telemetry_exporter_metrics_base_histogram_observe(
-        ctx_->source, *base, label_values, static_cast<double>(event.value_), &histogram_id);
+        ctx_->source, *base, label_values, observed, &histogram_id);
     // The same (base, label_values) pair always yields the same concrete id, so
     // the set de-dups: flush() then flushes each concrete histogram exactly once.
     if (result == DOCA_SUCCESS) {

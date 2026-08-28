@@ -70,10 +70,16 @@ namespace {
     // Turns the store's per-bucket counts into the cumulative form Prometheus
     // expects, ending with the explicit +Inf bucket that prometheus-cpp's own
     // Histogram::Collect() emits.
+    // scale_to_us converts the raw stored value into the microseconds the bucket
+    // bounds use. The writer applies it to pick a bucket but keeps histSums in the
+    // event's native unit (an integer sum stays exact there), so the sum is scaled
+    // here instead -- otherwise a nanosecond-valued phase would publish _bucket in
+    // microseconds and _sum in nanoseconds.
     [[nodiscard]] ClientMetric
     histogramMetric(std::vector<ClientMetric::Label> labels,
                     const storeSnapshot &s,
-                    std::size_t slot) {
+                    std::size_t slot,
+                    double scale_to_us) {
         ClientMetric m;
         m.label = std::move(labels);
         m.histogram.bucket.reserve(s.bucketCount + 1);
@@ -87,7 +93,7 @@ namespace {
             m.histogram.bucket.push_back(bucket);
         }
         m.histogram.sample_count = cumulative;
-        m.histogram.sample_sum = static_cast<double>(s.histSums[slot]);
+        m.histogram.sample_sum = static_cast<double>(s.histSums[slot]) * scale_to_us;
         return m;
     }
 
@@ -159,7 +165,8 @@ buildMetricFamilies(const std::vector<storeSnapshot> &snapshots) {
         family.type = MetricType::Histogram;
         const auto slot = static_cast<std::size_t>(type);
         for (const auto &snap : snapshots) {
-            family.metric.push_back(histogramMetric(baseLabels(snap), snap, slot));
+            family.metric.push_back(
+                histogramMetric(baseLabels(snap), snap, slot, descriptor.histogramScaleToUs));
         }
         families.push_back(std::move(family));
     }

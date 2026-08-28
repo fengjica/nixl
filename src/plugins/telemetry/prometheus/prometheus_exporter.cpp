@@ -135,8 +135,11 @@ nixlTelemetryPrometheusExporter::initializeMetrics() {
             registerGauge(event_type, descriptor.gaugeName, descriptor.gaugeHelp);
         }
         if (descriptor.histogramName != nullptr) {
-            registerHistogram(
-                event_type, descriptor.histogramName, descriptor.histogramHelp, histogram_buckets);
+            registerHistogram(event_type,
+                              descriptor.histogramName,
+                              descriptor.histogramHelp,
+                              histogram_buckets,
+                              descriptor.histogramScaleToUs);
         }
     }
     registerErrorCounters();
@@ -191,11 +194,13 @@ void
 nixlTelemetryPrometheusExporter::registerHistogram(const nixl_telemetry_event_type_t event_type,
                                                    const std::string &metric_name,
                                                    const std::string &help,
-                                                   const std::vector<double> &buckets) {
+                                                   const std::vector<double> &buckets,
+                                                   const double scale_to_us) {
     auto &family = prometheus::BuildHistogram().Name(metric_name).Help(help).Register(*registry_);
     auto &metric = family.Add({{"hostname", hostname_}, {"agent_name", agent_name_}},
                               prometheus::Histogram::BucketBoundaries(buckets));
-    const auto inserted = histograms_.try_emplace(event_type, &family, &metric).second;
+    const auto inserted =
+        histograms_.try_emplace(event_type, &family, &metric, scale_to_us).second;
     if (!inserted) {
         family.Remove(&metric);
     }
@@ -217,7 +222,8 @@ nixlTelemetryPrometheusExporter::exportEvent(const nixlTelemetryEvent &event) {
 
         const auto histogram_it = histograms_.find(event.eventType_);
         if (histogram_it != histograms_.end()) {
-            histogram_it->second.metric->Observe(static_cast<double>(event.value_));
+            histogram_it->second.metric->Observe(static_cast<double>(event.value_) *
+                                                 histogram_it->second.scaleToUs);
         }
 
         return NIXL_SUCCESS;
