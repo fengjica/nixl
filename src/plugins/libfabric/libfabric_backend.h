@@ -35,6 +35,7 @@
 
 #include "libfabric/libfabric_rail_manager.h"
 #include "libfabric/libfabric_common.h"
+#include "libfabric/libfabric_post_profile.h"
 #include "libfabric_connection.h"
 
 #ifdef HAVE_CUDA
@@ -588,6 +589,18 @@ public:
              const std::string &remote_agent,
              nixlBackendReqH *&handle,
              const nixl_opt_b_args_t *opt_args = nullptr) const override;
+
+    /**
+     * @brief Hand the agent the phase breakdown of the last postXfer on this thread
+     *
+     * Only produces anything when NIXL_POST_PROFILE selected at least one phase;
+     * see docs/profiling-postxfer-telemetry.md and libfabric_post_profile.h.
+     *
+     * @param[out] out Sample block to fill
+     * @return true if samples were collected and out was written
+     */
+    bool
+    drainPostPhaseSamples(nixlPostPhaseSamples &out) const override;
 
     /**
      * @brief Check transfer completion status

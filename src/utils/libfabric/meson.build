@@ -19,6 +19,7 @@ libfabric_utils_sources = files(
     'libfabric_rail.cpp',
     'libfabric_rail_manager.cpp',
     'libfabric_common.cpp',
+    'libfabric_post_profile.cpp',
     'libfabric_topology.cpp',
     # More implementation files will be added as we create them
 )
@@ -28,6 +29,7 @@ libfabric_utils_headers = files(
     'libfabric_rail.h',
     'libfabric_rail_manager.h',
     'libfabric_common.h',
+    'libfabric_post_profile.h',
     'libfabric_topology.h',
 )
 

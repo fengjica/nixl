@@ -35,6 +35,9 @@
 #include <stdexcept>
 #include <thread>
 
+// postXfer-path profiling hooks. Inert unless NIXL_POST_PROFILE selects a phase.
+namespace postProfile = nixl::libfabric::postProfile;
+
 /****************************************
  * Neuron Address Query
  *****************************************/
@@ -471,6 +474,11 @@ nixlLibfabricEngine::nixlLibfabricEngine(const nixlBackendInitParams *init_param
       runtime_(FI_HMEM_SYSTEM) {
 
     NIXL_INFO << "Initializing Libfabric Backend";
+
+    // Resolve NIXL_POST_PROFILE here, once, so the post path only ever reads an
+    // immutable mask: parsing or calibrating anything per-post would be far more
+    // expensive than the phases being measured.
+    postProfile::initFromEnv();
 
     // this is required for loading rail selection policy by configuration
     if (rail_manager_.init(getCustomParams()) != NIXL_SUCCESS) {
@@ -1294,6 +1302,11 @@ nixlLibfabricEngine::postXferDescriptors(nixlLibfabricReq::OpType op_type,
     bool use_cuda_addr_wa = false;
     int current_cuda_device = -1;
     if (!progress_thread_enabled_ && is_cuda_vram) {
+        // A5: CUDA context setup. Once per call here, but see the per-descriptor
+        // cudaSetDevice below -- with descriptors spread over several GPUs that one
+        // can fire repeatedly within a single post.
+        const postProfile::scopedPhase phase(
+            nixl_telemetry_event_type_t::AGENT_POST_ACCUM_CUDA_CTX);
         nixl_status_t status = vramApplyCtxEx(use_cuda_addr_wa);
         if (status != NIXL_SUCCESS) {
             return status;
@@ -1313,19 +1326,54 @@ nixlLibfabricEngine::postXferDescriptors(nixlLibfabricReq::OpType op_type,
 
     std::vector<int> last_desc_idx_per_rail(rail_manager_.getNumRails(), -1);
     std::vector<int> posts_since_flush(rail_manager_.getNumRails(), 0);
-    if (batch_writes) {
-        for (int i = start_idx; i < end_idx; ++i) {
-            const int rail_id = batchingRail(local, i, xfer_base_offset);
-            if (rail_id >= 0) {
-                last_desc_idx_per_rail[rail_id] = i;
+    {
+        // P4: the FI_MORE prepass, which walks every descriptor a second time (plus
+        // two heap allocations sized by rail count) before a single request is
+        // submitted. A full extra pass over the batch is exactly the shape of cost
+        // that would show up as post latency rising with batch size.
+        const postProfile::scopedPhase phase(
+            nixl_telemetry_event_type_t::AGENT_POST_PHASE_FI_MORE_PREPASS);
+        if (batch_writes) {
+            for (int i = start_idx; i < end_idx; ++i) {
+                const int rail_id = batchingRail(local, i, xfer_base_offset);
+                if (rail_id >= 0) {
+                    last_desc_idx_per_rail[rail_id] = i;
+                }
+            }
+            // How many rails this chunk spread over. A single posting thread
+            // round-robins across rails, so this says how many TX queues the batch
+            // had to fill before any of them could be expected to drain.
+            if (postProfile::enabled()) {
+                postProfile::count(
+                    nixl_telemetry_event_type_t::AGENT_POST_RAILS_TOUCHED,
+                    static_cast<uint64_t>(std::count_if(last_desc_idx_per_rail.begin(),
+                                                        last_desc_idx_per_rail.end(),
+                                                        [](int idx) { return idx >= 0; })));
             }
         }
     }
 
+    // P5: the submit loop. This is the aggregate the per-descriptor accumulators
+    // (A1-A5, timed inside the rail manager) decompose, so a run that selects this
+    // phase gets the total to check those against.
+    const postProfile::scopedPhase submit_loop_phase(
+        nixl_telemetry_event_type_t::AGENT_POST_PHASE_SUBMIT_LOOP);
+
     for (int desc_idx = start_idx; desc_idx < end_idx; ++desc_idx) {
-        const int rail_id = batch_writes ? batchingRail(local, desc_idx, xfer_base_offset) : -1;
-        const bool apply_fi_more =
-            useFiMore(desc_idx, rail_id, last_desc_idx_per_rail, posts_since_flush);
+        // A1: rail selection plus the FI_MORE decision, once per descriptor. Split
+        // out of the submit-loop total because it is pure bookkeeping -- if it is
+        // material, the fix is local and does not involve libfabric at all.
+        int rail_id = -1;
+        bool apply_fi_more = false;
+        {
+            const postProfile::scopedPhase phase(
+                nixl_telemetry_event_type_t::AGENT_POST_ACCUM_RAIL_SELECT);
+            if (batch_writes) {
+                rail_id = batchingRail(local, desc_idx, xfer_base_offset);
+            }
+            apply_fi_more =
+                useFiMore(desc_idx, rail_id, last_desc_idx_per_rail, posts_since_flush);
+        }
 
         auto *local_md = static_cast<nixlLibfabricPrivateMetadata *>(local[desc_idx].metadataP);
         auto *remote_md = static_cast<nixlLibfabricPublicMetadata *>(remote[desc_idx].metadataP);
@@ -1339,6 +1387,10 @@ nixlLibfabricEngine::postXferDescriptors(nixlLibfabricReq::OpType op_type,
         // should take place in the context of the progress thread
         if (!progress_thread_enabled_ && is_cuda_vram && !use_cuda_addr_wa &&
             device_id != current_cuda_device) {
+            // A5, continued: accumulates into the same series as the once-per-call
+            // context setup above, so the number is the whole CUDA cost of the post.
+            const postProfile::scopedPhase phase(
+                nixl_telemetry_event_type_t::AGENT_POST_ACCUM_CUDA_CTX);
             cudaError_t cuda_ret = cudaSetDevice(device_id);
             if (cuda_ret != cudaSuccess) {
                 NIXL_ERROR << "Failed to set CUDA device " << device_id
@@ -1400,27 +1452,38 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
                               nixlBackendReqH *&handle,
                               const nixl_opt_b_args_t *opt_args) const {
 
+    // Declared first so the accumulator is reset and the calibration sample taken
+    // on every path out of this function, error returns included.
+    const postProfile::scopedPost profile_post;
+
     // Validate connection
     std::shared_ptr<nixlLibfabricConnection> conn;
     {
-        std::lock_guard<std::mutex> lock(connection_state_mutex_);
-        auto conn_it = connections_.find(remote_agent);
-        if (conn_it == connections_.end() || !conn_it->second) {
-            NIXL_ERROR << "No valid connection found for agent: " << remote_agent;
-            return NIXL_ERR_NOT_FOUND;
+        // P1: resolving the remote agent to a connection, including the contended
+        // map probe and an on-demand establish.
+        const postProfile::scopedPhase phase(
+            nixl_telemetry_event_type_t::AGENT_POST_PHASE_CONN_LOOKUP);
+        {
+            std::lock_guard<std::mutex> lock(connection_state_mutex_);
+            auto conn_it = connections_.find(remote_agent);
+            if (conn_it == connections_.end() || !conn_it->second) {
+                NIXL_ERROR << "No valid connection found for agent: " << remote_agent;
+                return NIXL_ERR_NOT_FOUND;
+            }
+            conn = conn_it->second;
         }
-        conn = conn_it->second;
-    }
 
-    if (conn->overall_state_.load(std::memory_order_acquire) == ConnectionState::DISCONNECTED) {
-        NIXL_DEBUG << "No existing connection for " << remote_agent
-                   << ", establishing new connection";
-        nixl_status_t status = this->establishConnection(remote_agent);
-        if (status != NIXL_SUCCESS) {
-            NIXL_ERROR << "Failed to establish connection with " << remote_agent;
-            return status;
+        if (conn->overall_state_.load(std::memory_order_acquire) ==
+            ConnectionState::DISCONNECTED) {
+            NIXL_DEBUG << "No existing connection for " << remote_agent
+                       << ", establishing new connection";
+            nixl_status_t status = this->establishConnection(remote_agent);
+            if (status != NIXL_SUCCESS) {
+                NIXL_ERROR << "Failed to establish connection with " << remote_agent;
+                return status;
+            }
+            NIXL_DEBUG << "Established new connection with remote_agent: " << remote_agent;
         }
-        NIXL_DEBUG << "Established new connection with remote_agent: " << remote_agent;
     }
 
     NIXL_DEBUG << "Posting transfer for remote_agent: " << remote_agent
@@ -1432,51 +1495,66 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
         return NIXL_ERR_INVALID_PARAM;
     }
 
-    // Update notification from opt_args on repost
-    if (opt_args && opt_args->hasNotif) {
-        backend_handle->has_notif = true;
-        backend_handle->binary_notifs.clear();
-        fragmentNotificationMessage(opt_args->notifMsg,
-                                    localAgent,
-                                    backend_handle->total_notif_msg_len,
-                                    backend_handle->binary_notifs);
-    } else if (opt_args && !opt_args->hasNotif) {
-        backend_handle->has_notif = false;
-        backend_handle->binary_notifs.clear();
-        backend_handle->total_notif_msg_len = 0;
-    }
-
-    // Allocate xfer_id once in prepXfer
-    backend_handle->post_xfer_id = LibfabricUtils::getNextXferId();
-
-    nixlLibfabricReq::OpType op_type;
-    int desc_count = local.descCount();
+    const nixlLibfabricReq::OpType op_type =
+        (operation == NIXL_WRITE) ? nixlLibfabricReq::WRITE : nixlLibfabricReq::READ;
+    const int desc_count = local.descCount();
 
     NIXL_DEBUG << "Processing " << desc_count
                << " descriptors using optimized single-pass approach";
 
-    op_type = (operation == NIXL_WRITE) ? nixlLibfabricReq::WRITE : nixlLibfabricReq::READ;
+    {
+        // P2: per-post setup -- notification fragmentation, xfer id, and sizing the
+        // request-tracking table. The last of these is O(descriptors), so it is a
+        // candidate explanation for post latency growing with batch size on its own.
+        const postProfile::scopedPhase phase(
+            nixl_telemetry_event_type_t::AGENT_POST_PHASE_NOTIF_PREP);
 
-    // Set initial submit request count to maximum possible requests for this xfer.
-    size_t max_possible_requests = desc_count * rail_manager_.getNumRails();
-    backend_handle->init_request_tracking(max_possible_requests);
+        // Update notification from opt_args on repost
+        if (opt_args && opt_args->hasNotif) {
+            backend_handle->has_notif = true;
+            backend_handle->binary_notifs.clear();
+            fragmentNotificationMessage(opt_args->notifMsg,
+                                        localAgent,
+                                        backend_handle->total_notif_msg_len,
+                                        backend_handle->binary_notifs);
+        } else if (opt_args && !opt_args->hasNotif) {
+            backend_handle->has_notif = false;
+            backend_handle->binary_notifs.clear();
+            backend_handle->total_notif_msg_len = 0;
+        }
+
+        // Allocate xfer_id once in prepXfer
+        backend_handle->post_xfer_id = LibfabricUtils::getNextXferId();
+
+        // Set initial submit request count to maximum possible requests for this xfer.
+        size_t max_possible_requests = desc_count * rail_manager_.getNumRails();
+        backend_handle->init_request_tracking(max_possible_requests);
+    }
 
     size_t total_submitted = 0;
 
-    // Validate metadata before posting. The parallel path may post descriptors out of order, so
-    // simple input errors should be caught before any worker submits RDMA operations.
-    for (int desc_idx = 0; desc_idx < desc_count; ++desc_idx) {
-        auto *local_md = static_cast<nixlLibfabricPrivateMetadata *>(local[desc_idx].metadataP);
-        auto *remote_md = static_cast<nixlLibfabricPublicMetadata *>(remote[desc_idx].metadataP);
-        if (!local_md || !remote_md || !remote_md->conn_) {
-            NIXL_ERROR << "Invalid metadata pointers for descriptor " << desc_idx;
-            return NIXL_ERR_INVALID_PARAM;
-        }
+    {
+        // P3: metadata validation. Also O(descriptors), and it walks the descriptor
+        // lists once before any submission, so it warms the cache the submit loop
+        // then reuses -- worth knowing before attributing anything to the submit loop.
+        const postProfile::scopedPhase phase(
+            nixl_telemetry_event_type_t::AGENT_POST_PHASE_MD_VALIDATE);
 
-        // Validate connection for this descriptor
-        if (remote_md->conn_ != conn) {
-            NIXL_ERROR << "Connection mismatch for descriptor " << desc_idx;
-            return NIXL_ERR_MISMATCH;
+        // Validate metadata before posting. The parallel path may post descriptors out of order,
+        // so simple input errors should be caught before any worker submits RDMA operations.
+        for (int desc_idx = 0; desc_idx < desc_count; ++desc_idx) {
+            auto *local_md = static_cast<nixlLibfabricPrivateMetadata *>(local[desc_idx].metadataP);
+            auto *remote_md = static_cast<nixlLibfabricPublicMetadata *>(remote[desc_idx].metadataP);
+            if (!local_md || !remote_md || !remote_md->conn_) {
+                NIXL_ERROR << "Invalid metadata pointers for descriptor " << desc_idx;
+                return NIXL_ERR_INVALID_PARAM;
+            }
+
+            // Validate connection for this descriptor
+            if (remote_md->conn_ != conn) {
+                NIXL_ERROR << "Connection mismatch for descriptor " << desc_idx;
+                return NIXL_ERR_MISMATCH;
+            }
         }
     }
 
@@ -1484,6 +1562,10 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
     const size_t xfer_base_offset = rail_manager_.reserveBaseOffset();
     const bool use_post_pool = post_thread_pool_ && post_thread_count_ > 0 && desc_count > 0 &&
         static_cast<size_t>(desc_count) >= post_split_batch_size_;
+
+    if (use_post_pool && postProfile::enabled()) {
+        postProfile::warnThreadPoolActive();
+    }
 
     if (!use_post_pool) {
         nixl_status_t status = postXferDescriptors(op_type,
@@ -1592,8 +1674,18 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
         backend_handle->adjust_total_submitted_requests(total_submitted);
     }
 
+    // Denominator for every phase above: a per-descriptor cost only explains a
+    // batch-size trend if the request count actually tracks the batch size.
+    postProfile::count(nixl_telemetry_event_type_t::AGENT_POST_SUBMITTED_REQUESTS,
+                       total_submitted);
+
     // Send notification immediately after successful request submission
     if (backend_handle->has_notif && backend_handle->operation_ == nixl_xfer_op_t::NIXL_WRITE) {
+        // P6: the notification send. One post regardless of batch size, so this is
+        // the control: if it grows with batch size too, the cause is shared
+        // backpressure rather than anything per-descriptor.
+        const postProfile::scopedPhase phase(
+            nixl_telemetry_event_type_t::AGENT_POST_PHASE_NOTIF_SEND);
         nixl_status_t notif_status = notifSendPriv(remote_agent,
                                                    backend_handle->binary_notifs,
                                                    backend_handle->total_notif_msg_len,
@@ -1609,6 +1701,12 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
 
     // Progress rails to kick off transfers
     if (!progress_thread_enabled_) {
+        // P7: the inline CQ drain that only exists on the PT-OFF path. With no
+        // progress thread, this is where the wire time of everything just submitted
+        // can land inside postXfer -- the primary suspect for post latency scaling
+        // with batch size.
+        const postProfile::scopedPhase phase(
+            nixl_telemetry_event_type_t::AGENT_POST_PHASE_PROGRESS_TAIL);
         nixl_status_t progress_status = rail_manager_.progressActiveRails();
         if (progress_status != NIXL_SUCCESS && progress_status != NIXL_IN_PROG) {
             NIXL_ERROR << "Failed to progress rails in postXfer";
@@ -1633,6 +1731,11 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
     }
 
     return NIXL_IN_PROG;
+}
+
+bool
+nixlLibfabricEngine::drainPostPhaseSamples(nixlPostPhaseSamples &out) const {
+    return postProfile::drain(out);
 }
 
 nixl_status_t
