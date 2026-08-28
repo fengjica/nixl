@@ -16,6 +16,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <chrono>
@@ -424,6 +425,97 @@ TEST_F(telemetryTest, MetricAllowlistSubset) {
     ASSERT_TRUE(buffer->pop(event));
     EXPECT_EQ(event.eventType_, nixl_telemetry_event_type_t::AGENT_TX_BYTES);
     EXPECT_EQ(event.value_, 1024);
+
+    envHelper_.popVar(); // TELEMETRY_ENABLED_METRICS_VAR
+    envHelper_.popVar(); // TELEMETRY_RUN_INTERVAL_VAR
+}
+
+// addPostPhaseStats publishes only the sampled entries, in event-type order, and
+// maps each array index back to the right event type. The one-phase-per-run
+// methodology means almost every entry is zero, so skipping zeros is what keeps a
+// profiling run down to one event per post.
+TEST_F(telemetryTest, AddPostPhaseStatsPublishesOnlySampledEntries) {
+    envHelper_.addVar(TELEMETRY_RUN_INTERVAL_VAR, "1");
+    testFile_ = "test_post_phase_sampled";
+
+    constexpr auto first = static_cast<size_t>(nixl_post_phase_first_event);
+    std::array<uint64_t, nixl_post_phase_event_count> values{};
+    values[static_cast<size_t>(nixl_telemetry_event_type_t::AGENT_POST_PHASE_SUBMIT_LOOP) - first] =
+        4200;
+    values[static_cast<size_t>(nixl_telemetry_event_type_t::AGENT_POST_EAGAIN_ATTEMPTS) - first] =
+        7;
+
+    {
+        nixlTelemetry telemetry(testFile_, "BUFFER");
+        EXPECT_NO_THROW(telemetry.addPostPhaseStats(values));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    auto path = testDir_.string() + "/" + testFile_;
+    auto buffer =
+        std::make_unique<sharedRingBuffer<nixlTelemetryEvent>>(path, false, TELEMETRY_VERSION);
+    EXPECT_EQ(buffer->size(), 2);
+    nixlTelemetryEvent event;
+    ASSERT_TRUE(buffer->pop(event));
+    EXPECT_EQ(event.eventType_, nixl_telemetry_event_type_t::AGENT_POST_PHASE_SUBMIT_LOOP);
+    EXPECT_EQ(event.value_, 4200);
+    ASSERT_TRUE(buffer->pop(event));
+    EXPECT_EQ(event.eventType_, nixl_telemetry_event_type_t::AGENT_POST_EAGAIN_ATTEMPTS);
+    EXPECT_EQ(event.value_, 7);
+
+    envHelper_.popVar(); // TELEMETRY_RUN_INTERVAL_VAR
+}
+
+// An all-zero sample block submits nothing: a backend without the profiling
+// harness enabled must not push an empty batch once per post.
+TEST_F(telemetryTest, AddPostPhaseStatsIgnoresEmptySamples) {
+    envHelper_.addVar(TELEMETRY_RUN_INTERVAL_VAR, "1");
+    testFile_ = "test_post_phase_empty";
+
+    {
+        nixlTelemetry telemetry(testFile_, "BUFFER");
+        EXPECT_NO_THROW(
+            telemetry.addPostPhaseStats(std::array<uint64_t, nixl_post_phase_event_count>{}));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    auto path = testDir_.string() + "/" + testFile_;
+    auto buffer =
+        std::make_unique<sharedRingBuffer<nixlTelemetryEvent>>(path, false, TELEMETRY_VERSION);
+    EXPECT_EQ(buffer->size(), 0);
+
+    envHelper_.popVar(); // TELEMETRY_RUN_INTERVAL_VAR
+}
+
+// The phase family is selectable with one glob, which is how a run isolates the
+// postXfer breakdown from the rest of the agent's telemetry.
+TEST_F(telemetryTest, AddPostPhaseStatsHonorsAllowlist) {
+    envHelper_.addVar(TELEMETRY_RUN_INTERVAL_VAR, "1");
+    envHelper_.addVar(TELEMETRY_ENABLED_METRICS_VAR, "agent_post_phase_submit_loop");
+    testFile_ = "test_post_phase_allowlist";
+
+    constexpr auto first = static_cast<size_t>(nixl_post_phase_first_event);
+    std::array<uint64_t, nixl_post_phase_event_count> values{};
+    values[static_cast<size_t>(nixl_telemetry_event_type_t::AGENT_POST_PHASE_SUBMIT_LOOP) - first] =
+        1234; // allowed
+    values[static_cast<size_t>(nixl_telemetry_event_type_t::AGENT_POST_PHASE_CONN_LOOKUP) - first] =
+        99; // filtered
+
+    {
+        nixlTelemetry telemetry(testFile_, "BUFFER");
+        telemetry.addPostPhaseStats(values);
+        telemetry.updateTxBytes(1024); // filtered
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    auto path = testDir_.string() + "/" + testFile_;
+    auto buffer =
+        std::make_unique<sharedRingBuffer<nixlTelemetryEvent>>(path, false, TELEMETRY_VERSION);
+    EXPECT_EQ(buffer->size(), 1);
+    nixlTelemetryEvent event;
+    ASSERT_TRUE(buffer->pop(event));
+    EXPECT_EQ(event.eventType_, nixl_telemetry_event_type_t::AGENT_POST_PHASE_SUBMIT_LOOP);
+    EXPECT_EQ(event.value_, 1234);
 
     envHelper_.popVar(); // TELEMETRY_ENABLED_METRICS_VAR
     envHelper_.popVar(); // TELEMETRY_RUN_INTERVAL_VAR

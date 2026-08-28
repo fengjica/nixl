@@ -17,6 +17,9 @@
 #ifndef __BACKEND_ENGINE_H
 #define __BACKEND_ENGINE_H
 
+#include <algorithm>
+#include <array>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -28,6 +31,56 @@
 #include "telemetry_event.h"
 
 constexpr size_t MAX_TELEMETRY_QUEUE_SIZE = 1000;
+
+// One postXfer call's worth of profiling samples, handed to the agent right
+// after postXfer returns. See docs/profiling-postxfer-telemetry.md.
+//
+// This exists instead of reusing nixlBackendEngine::addTelemetryEvent() because
+// the plan budgets ~400 ns for an entire post: a mutex plus a heap-growing
+// vector per phase would be a large fraction of the interval under study, and
+// the per-descriptor accumulators are hit once per descriptor, so their cost
+// would scale with batch size and manufacture the very trend being measured.
+// A fixed POD keeps accumulation lock-free, allocation-free, and O(1) in the
+// number of descriptors.
+//
+// Values are indexed by event type offset from nixl_post_phase_first_event.
+// Zero means "not sampled": the agent skips those, so a phase the harness was
+// not asked to time costs nothing downstream either.
+struct nixlPostPhaseSamples {
+    std::array<uint64_t, nixl_post_phase_event_count> values{};
+
+    void
+    add(nixl_telemetry_event_type_t event_type, uint64_t value) noexcept {
+        values[index(event_type)] += value;
+    }
+
+    void
+    setMax(nixl_telemetry_event_type_t event_type, uint64_t value) noexcept {
+        auto &slot = values[index(event_type)];
+        slot = std::max(slot, value);
+    }
+
+    void
+    clear() noexcept {
+        values.fill(0);
+    }
+
+    [[nodiscard]] bool
+    empty() const noexcept {
+        for (const auto value : values) {
+            if (value != 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    [[nodiscard]] static size_t
+    index(nixl_telemetry_event_type_t event_type) noexcept {
+        return static_cast<size_t>(event_type) -
+            static_cast<size_t>(nixl_post_phase_first_event);
+    }
+};
 
 // Base backend engine class for different backend implementations
 class nixlBackendEngine {
@@ -92,6 +145,19 @@ class nixlBackendEngine {
         getTelemetryEvents() {
             std::lock_guard<std::mutex> lock(telemetryEventsMutex_);
             return std::move(telemetryEvents_);
+        }
+
+        // Hand over the profiling samples the most recent postXfer accumulated on
+        // the calling thread, and reset them. Returns false if there is nothing to
+        // publish, which is the case for every backend that does not implement the
+        // postXfer profiling harness.
+        //
+        // The agent calls this on the posting thread immediately after postXfer
+        // returns, so an implementation's accumulator can be thread_local and needs
+        // no synchronization. Declared const because postXfer is const.
+        virtual bool
+        drainPostPhaseSamples(nixlPostPhaseSamples &) const {
+            return false;
         }
 
         bool getInitErr() const noexcept { return initErr; }

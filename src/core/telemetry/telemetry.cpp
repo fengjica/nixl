@@ -416,3 +416,31 @@ nixlTelemetry::addXferStats(std::chrono::microseconds xfer_time,
     // result is intentionally not consumed here.
     (void)stagingQueue_.tryPushBatch(std::span{batch}.first(count));
 }
+
+void
+nixlTelemetry::addPostPhaseStats(
+    const std::array<uint64_t, nixl_post_phase_event_count> &values) {
+    // Same shape as addXferStats: filter into a fixed-size stack array, then one
+    // all-or-none push. Nothing here allocates or grows with the descriptor count,
+    // because this runs on the posting thread between two posts.
+    std::array<nixlTelemetryEvent, nixl_post_phase_event_count> batch;
+    size_t count = 0;
+    for (size_t i = 0; i < values.size(); ++i) {
+        // A zero sample means the harness did not time that phase this run. The
+        // methodology times one phase per run, so all but a few entries are zero.
+        if (values[i] == 0) {
+            continue;
+        }
+        const auto event_type = static_cast<nixl_telemetry_event_type_t>(
+            static_cast<size_t>(nixl_post_phase_first_event) + i);
+        if (!isMetricEnabled(event_type)) {
+            continue;
+        }
+        batch[count++] = {event_type, values[i]};
+    }
+    if (count == 0) {
+        return;
+    }
+
+    (void)stagingQueue_.tryPushBatch(std::span{batch}.first(count));
+}

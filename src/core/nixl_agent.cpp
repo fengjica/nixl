@@ -1191,6 +1191,21 @@ nixlAgent::postXferReq(nixlXferReqH *req_hndl,
     if (data->telemetry_) {
         NIXL_DEBUG << req_hndl->initiatorDescs.to_string(true);
 
+        // Publish the backend's postXfer phase breakdown, if it collected one. This
+        // is separate from updateRequestStats() below because that path deliberately
+        // publishes nothing for NIXL_TELEMETRY_POST -- it defers to completion so a
+        // transfer yields one set of events -- whereas the phase samples describe the
+        // post itself and have no completion to wait for. Draining here also covers
+        // the error path: a post that failed partway still spent time doing so, and
+        // hiding that would skew the phase histograms toward the successful posts.
+        //
+        // Runs on the thread that called postXfer, which is what lets the backend
+        // keep its accumulator thread_local and lock-free.
+        nixlPostPhaseSamples post_samples;
+        if (req_hndl->engine->drainPostPhaseSamples(post_samples)) {
+            data->telemetry_->addPostPhaseStats(post_samples.values);
+        }
+
         if (req_hndl->status < 0) {
             data->addErrorTelemetry(req_hndl->status);
         } else if (req_hndl->status == NIXL_IN_PROG) {

@@ -23,6 +23,7 @@
 #include "mem_section.h"
 #include "nixl_types.h"
 
+#include <array>
 #include <string>
 #include <memory>
 #include <chrono>
@@ -101,6 +102,24 @@ public:
                  bool is_write,
                  uint64_t bytes,
                  std::chrono::microseconds post_time);
+
+    /**
+     * @brief Records one postXfer call's profiling samples as a single batch.
+     *
+     * Companion to addXferStats() for the postXfer-path phases (see
+     * docs/profiling-postxfer-telemetry.md). Takes the backend's raw sample block
+     * rather than nixlPostPhaseSamples itself so that telemetry does not have to
+     * depend on the backend API. Zero-valued and deactivated entries are skipped
+     * before batching, so a run that selected one phase submits one event.
+     *
+     * Like addXferStats() the batch is all-or-none: a phase breakdown with some
+     * events dropped would be read as a phase that took no time, which is worse
+     * than a visible gap in the histogram count.
+     * @param values Sample values indexed by offset from
+     *        nixl_post_phase_first_event. Time-valued entries are NANOSECONDS.
+     */
+    void
+    addPostPhaseStats(const std::array<uint64_t, nixl_post_phase_event_count> &values);
 
 private:
     // Load the named telemetry plugin and create its exporter. Throws on a
