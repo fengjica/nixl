@@ -20,6 +20,10 @@
 #include "common/nixl_log.h"
 #include "serdes/serdes.h"
 #include "libfabric_common.h"
+#include "libfabric_post_profile.h"
+
+// postXfer-path profiling hooks. Inert unless NIXL_POST_PROFILE selects a phase.
+namespace postProfile = nixl::libfabric::postProfile;
 
 #ifdef HAVE_CUDA
 #include <cuda_runtime.h>
@@ -1389,6 +1393,14 @@ nixlLibfabricRail::postWrite(const void *local_buffer,
     while (true) {
         // Libfabric fi_writemsg call (supports FI_MORE flag)
         {
+            // A3: the submit call itself, accumulated over every attempt including
+            // the ones that come back EAGAIN. The endpoint mutex is inside the
+            // measurement on purpose: on the single-thread PT-OFF path it should be
+            // uncontended and near-free, so if A3 is large the cost is in libfabric,
+            // and if A3 is large only when other threads are posting the cost is the
+            // lock. Both readings need the lock included.
+            const postProfile::scopedPhase phase(
+                nixl_telemetry_event_type_t::AGENT_POST_ACCUM_FI_WRITEMSG);
             const std::lock_guard<std::mutex> ep_lock(ep_mutex_);
             ret = fi_writemsg(endpoint, &msg, fi_flags | FI_REMOTE_CQ_DATA);
         }
@@ -1406,6 +1418,14 @@ nixlLibfabricRail::postWrite(const void *local_buffer,
             // Resource temporarily unavailable - retry indefinitely for all providers
             attempt++;
 
+            // The backpressure signal. A post that never hits EAGAIN cannot be
+            // absorbing wire time; once the count is non-zero the TX queue was full,
+            // which is the shape the batch-size trend is expected to have -- flat
+            // until in-flight posts reach the queue depth, then a knee.
+            postProfile::count(nixl_telemetry_event_type_t::AGENT_POST_EAGAIN_ATTEMPTS, 1);
+            postProfile::observeMax(nixl_telemetry_event_type_t::AGENT_POST_EAGAIN_MAX_ATTEMPTS,
+                                    static_cast<uint64_t>(attempt));
+
             // Log every N attempts to avoid log spam
             if (attempt % NIXL_LIBFABRIC_LOG_INTERVAL_ATTEMPTS == 0) {
                 NIXL_DEBUG << "fi_writedata still retrying EAGAIN on rail " << rail_id << " after "
@@ -1417,6 +1437,11 @@ nixlLibfabricRail::postWrite(const void *local_buffer,
 
             // Progress completion queue to drain pending completions before retry
             if (!progress_thread_enabled_) {
+                // A4: the inline CQ drain that only the PT-OFF path performs. This is
+                // where a post pays for the wire, not for CPU work: if the batch-size
+                // trend is backpressure inversion, this is the series that carries it.
+                const postProfile::scopedPhase phase(
+                    nixl_telemetry_event_type_t::AGENT_POST_ACCUM_EAGAIN_DRAIN);
                 nixl_status_t progress_status = progressCompletionQueue();
                 if (progress_status != NIXL_SUCCESS && progress_status != NIXL_IN_PROG) {
                     NIXL_ERROR << "progressCompletionQueue failed on rail " << rail_id

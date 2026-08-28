@@ -18,6 +18,7 @@
 
 #include "libfabric_rail_manager.h"
 #include "libfabric/libfabric_common.h"
+#include "libfabric/libfabric_post_profile.h"
 #include "libfabric/libfabric_topology.h"
 #include "common/nixl_log.h"
 #include "serdes/serdes.h"
@@ -420,7 +421,16 @@ nixlLibfabricRailManager::prepareAndSubmitTransfer(
         const uint64_t fi_flags = (batch_write && apply_fi_more) ? FI_MORE : 0;
         NIXL_DEBUG << "rail " << rail_id << ", remote_ep_id " << remote_ep_id;
         // Allocate request
-        nixlLibfabricReq *req = rails_[rail_id]->allocateDataRequest(op_type, xfer_id);
+        // A2: taking a request object from the rail's pool, once per descriptor. A
+        // pool hit is a stack pop under a lock; a pool miss allocates. If this grows
+        // with batch size the pool is being exhausted, which is a fixable sizing
+        // problem rather than anything to do with the fabric.
+        nixlLibfabricReq *req = nullptr;
+        {
+            const postProfile::scopedPhase phase(
+                nixl_telemetry_event_type_t::AGENT_POST_ACCUM_REQ_ALLOC);
+            req = rails_[rail_id]->allocateDataRequest(op_type, xfer_id);
+        }
         if (!req) {
             NIXL_ERROR << "Failed to allocate request for rail " << rail_id;
             return NIXL_ERR_BACKEND;
@@ -514,7 +524,14 @@ nixlLibfabricRailManager::prepareAndSubmitTransfer(
                 break;
             }
             // Allocate request
-            nixlLibfabricReq *req = rails_[rail_id]->allocateDataRequest(op_type, xfer_id);
+            // A2, striping path: same series, so the number covers the whole post
+            // regardless of which strategy the transfer size selected.
+            nixlLibfabricReq *req = nullptr;
+            {
+                const postProfile::scopedPhase phase(
+                    nixl_telemetry_event_type_t::AGENT_POST_ACCUM_REQ_ALLOC);
+                req = rails_[rail_id]->allocateDataRequest(op_type, xfer_id);
+            }
             if (!req) {
                 NIXL_ERROR << "Failed to allocate request for rail " << rail_id;
                 return NIXL_ERR_BACKEND;
