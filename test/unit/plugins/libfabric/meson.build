@@ -32,6 +32,15 @@ if get_option('buildtype') != 'release' and 'LIBFABRIC' not in static_plugins
         dependency('dl', required: true),
     ]
 
+    # The test itself uses no CUDA, but libnixl_libfabric_utils.a is built against cuda_dep, so its
+    # '-lcudart -lcuda' land on this link regardless. Naming cuda_dep is what makes them resolvable,
+    # as it selects nvcc as the link driver, the same way the utils layer tests do. HAVE_CUDA stays
+    # undefined so the test needs no GPU; the HAVE_CUDA guards in the headers it shares with the
+    # static library are include-only, so no shared type changes layout.
+    if cuda_dep.found()
+        libfabric_backend_test_dep += [cuda_dep]
+    endif
+
     libfabric_backend_test_inc = [
         nixl_inc_dirs,
         utils_inc_dirs,
