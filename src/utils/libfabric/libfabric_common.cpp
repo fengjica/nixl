@@ -171,7 +171,8 @@ getNumConfiguredNumaNodes(int &node_count) {
 }
 
 // Thread-safe atomic counter for transfer ID generation.
-static_assert(NIXL_XFER_ID_BITS == 16, "XFER_ID width must match the counter type of getNextXferId");
+static_assert(NIXL_XFER_ID_BITS == 16,
+              "XFER_ID width must match the counter type of getNextXferId");
 static std::atomic<uint16_t> g_xfer_id_counter{1};
 
 uint16_t

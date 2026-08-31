@@ -84,8 +84,8 @@ constexpr const char *NIXL_HANDSHAKE_TAG_CONN = "conn";
 //
 // AGENT_INDEX caps the number of peers a single agent can address: 12 bits allows 4096 peers.
 //
-// Note that all agents in a pool must run the same wire version; that is enforced by handshake version
-// check.
+// Note that all agents in a pool must run the same wire version; that is enforced by handshake
+// version check.
 
 // Total width of the immediate data field on the wire.
 constexpr uint32_t NIXL_IMM_DATA_BITS = 32;
