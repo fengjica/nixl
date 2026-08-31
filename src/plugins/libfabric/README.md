@@ -165,11 +165,13 @@ fi_info -p efa
 
 **`Cannot add agent ...: agent index N does not fit the 12-bit agent index`:**
 
-The agent has hit the peer cap described under
-[Wire Protocol and Scaling Limits](#wire-protocol-and-scaling-limits). Reduce the number of agents a
-single agent connects to, or shard the deployment so each agent talks to a subset of the other pool.
-Note the cap is lifetime-scoped, so an agent that churns through short-lived peers can hit it while
-connected to far fewer.
+The agent has exhausted the peer cap described under
+[Wire Protocol and Scaling Limits](#wire-protocol-and-scaling-limits). Indices are retired rather
+than recycled, so the cap is lifetime-scoped: disconnecting a peer does not free its index, and an
+agent that churns through short-lived peers can hit the limit while connected to far fewer. Restart
+or recreate the agent to clear the table, as nothing releases an index in the running process. To
+keep the next lifetime from hitting the cap again, reduce the number of peers a single agent
+connects to, or shard the deployment so each agent talks to a subset of the pool.
 
 **`Rejecting handshake from a peer on wire version N`:**
 

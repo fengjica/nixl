@@ -637,6 +637,12 @@ nixlLibfabricRail::nixlLibfabricRail(const std::string &device,
         NIXL_TRACE << "Successfully initialized rail " << rail_id;
     }
     catch (...) {
+        // The destructor does not run for a failed constructor, so cleanup() never gets the chance
+        // to release info. Free it here to cover every throw site above.
+        if (info) {
+            fi_freeinfo(info);
+            info = nullptr;
+        }
         fi_freeinfo(hints);
         throw;
     }
