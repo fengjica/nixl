@@ -453,19 +453,30 @@ accumulator against; that is usually worth it.
 ### 7.4 Sweep and configuration
 
 ```bash
-export NIXL_TELEMETRY_ENABLE="y"
-export NIXL_TELEMETRY_ENABLED_METRICS="agent_xfer_post_time,agent_post_*"
-export NIXL_TELEMETRY_HISTOGRAM_BUCKETS_US=0.25,0.5,1,2,4,8,16,32,64,128
+export NIXL_TELEMETRY_ENABLE=1
+export NIXL_TELEMETRY_DIR=/dev/shm/nixltel          # node-local, never NFS
+export NIXL_TELEMETRY_BUFFER_SIZE=1048576           # sizes the staging queue AND the ring file
+export NIXL_TELEMETRY_ENABLED_METRICS="agent_xfer_post_time,agent_post_*,agent_telemetry_events_dropped"
 
 # Which phases are timed. One phase (or one small group) per run -- see 7.3.
 export NIXL_POST_PROFILE="agent_post_phase_*"
 
-# PT OFF is the default: --enable_pt is a bare boolean flag, so simply omit it.
-./nixlbench --backend=LIBFABRIC --op_type=WRITE \
-  --start_block_size=16384 --max_block_size=16384 \
-  --start_batch_size=1 --max_batch_size=1024 \
-  --num_threads=1 --warmup_iter=100 --num_iter=1000
+# PT OFF is the default: --enable-pt is a bare boolean flag, so simply omit it.
+./nixlbench --backend=LIBFABRIC --op-type=WRITE \
+  --start-block-size=16384 --max-block-size=16384 \
+  --start-batch-size=64 --max-batch-size=64 \
+  --num-threads=1 --progress-threads=0 --warmup-iter=32 --num-iter=208
 ```
+
+Setting `NIXL_TELEMETRY_DIR` selects the built-in buffer exporter, which writes
+**raw per-event samples** to `$NIXL_TELEMETRY_DIR/<agent_name>` — full
+distributions offline, no Prometheus to stand up.
+`NIXL_TELEMETRY_HISTOGRAM_BUCKETS_US` is a Prometheus-exporter setting and does
+nothing on this route. Default `NIXL_TELEMETRY_BUFFER_SIZE` is 4096 events,
+which both drops at the staging queue and wraps the ring; oversize it and check
+the drop gate below. If the library is installed somewhere other than its build
+prefix, set `NIXL_PLUGIN_DIR=<prefix>/lib/<triplet>/plugins` too, or the backend
+plugin is not found.
 
 **Two separate filters, and both must let a series through.**
 `NIXL_POST_PROFILE` decides what is *measured* (it is what costs runtime);
@@ -478,9 +489,28 @@ both a token matching nothing is ignored with a warning
 (`docs/telemetry.md:155`), so check the startup log rather than assuming a glob
 landed.
 
-One invocation sweeps the batch range (`main.cpp:115`), so a single run per
-instrumentation configuration covers the whole curve. Keep `--warmup_iter`
-identical across runs — it is part of the comparability protocol in §7.2.
+One invocation sweeps the batch range (`main.cpp:115`), but **a swept run is not
+analysable on the buffer route**: `nixlTelemetryEvent` is `{eventType_, value_}`
+with no timestamp, so samples from different batch sizes cannot be told apart
+afterwards. Pin one batch size per invocation
+(`--start-batch-size == --max-batch-size`) with a fresh `NIXL_TELEMETRY_DIR` per
+point. Keep `--warmup-iter` identical across runs — it is part of the
+comparability protocol in §7.2.
+
+### 7.5 Reading the samples
+
+`examples/python/postxfer_profile_report.py <buffer file>` aggregates the ring
+into count/mean/p50/p99/max per event and prints the validity gates (staging
+drops, phase coverage against `agent_xfer_post_time`, per-descriptor post against
+the 400 ns budget, and the calibration noise floor). Unlike
+`examples/python/telemetry_reader.py` it does not consume the buffer, so it can
+run on a file left behind by an exited process.
+
+Pass `--skip <warmup_iter + a few>`. Warmup posts are in the buffer too, and the
+**first post pays connection establishment** — measured at 2.04 s inside
+`agent_post_phase_conn_lookup`, against a 60 ns median for that same phase. One
+such sample decides any mean or sum it lands in, which is why the coverage gate
+is computed on medians.
 
 Overhead isolation, per `docs/telemetry.md:159` — run each configuration four
 ways and publish the deltas alongside results:
