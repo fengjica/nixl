@@ -605,10 +605,13 @@ points, and the two are measured by unrelated code paths.
 
 **Caveats to carry with these numbers.**
 
-- `agent_xfer_post_time` is **integer microseconds**, so one LSB is ±62 ns of a
-  375 ns figure at b16 (±17%), ±31 ns at b32, ±16 ns at b64. The apparent
-  flatness of 328–406 ns below b512 is therefore partly quantization; the
-  437/554/570/488 ns values above the knee are quantization-free.
+- `agent_xfer_post_time` is **integer microseconds**, truncated toward zero
+  (§9), so every per-descriptor figure derived from it is a **lower bound**, short
+  by up to `1000 ns / batch`: the true cost is 375–437 ns at b16, 406–437 at b32,
+  328–344 at b64, and within 2 ns of the printed value from b512 up. The apparent
+  flatness below b512 is therefore partly quantization; the 437/554/570/488 ns
+  values above the knee are exact at this resolution. The one-sidedness matters
+  for finding 1: the baseline is at or *above* the 400 ns budget, not below it.
 - `attempts ÷ batch` (3.9% at b4096 rising to 7.5% at b32768) is an **upper
   bound** on the fraction of descriptors that stalled, since one submission can
   contribute up to `max_attempts` = 4 attempts. The true distinct-stall fraction
@@ -700,10 +703,17 @@ descriptor inside `submit_loop`?"
   ~417 µs post at batch 1024, ~0.9 ms of ~16 ms at batch 32768 (5–7% either way).
   Subtract that before comparing an accumulator against the phase that contains
   it, and read `agent_post_accum_*` p50s as upper bounds.
-- **`agent_xfer_post_time` is integer microseconds**, so per-descriptor figures
-  derived from it carry ±1 µs / batch of quantization: ±62 ns at batch 16, under
-  1 ns from batch 1024 up. Small-batch per-descriptor numbers cannot resolve
-  differences below ~60 ns.
+- **`agent_xfer_post_time` is integer microseconds, and the truncation is
+  one-sided.** `nixlDuration::elapsed()` measures in ns via rdtsc but returns
+  `std::chrono::microseconds` through a `duration_cast` that truncates toward zero
+  (`nixl_duration.h:65-76`, `:102-105`); the value reaches telemetry as whole
+  microseconds (`nixl_agent.cpp:94`, `telemetry.cpp:401`). So a reported post time
+  is short of the truth by 0–999 ns, and any per-descriptor figure derived from it
+  is a **lower bound** missing up to `1000 ns / batch` — 62 ns at batch 16, 16 ns
+  at batch 64, under 1 ns from batch 1024 up. The harness's own phase and
+  accumulator series are unaffected: they carry native nanoseconds (§6.2,
+  `libfabric_post_profile.h:120-134`). Quote small-batch per-descriptor numbers as
+  intervals, not points.
 
 ---
 
