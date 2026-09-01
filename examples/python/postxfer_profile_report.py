@@ -201,28 +201,41 @@ def main():
         dropped = by_type.get(EVENT_NAMES.index("agent_telemetry_events_dropped"), [])
         print(f"gate: staging drops = {sum(dropped)} (must be 0)")
         post = by_type.get(EVENT_NAMES.index("agent_xfer_post_time"), [])
+        # A counters-only run (NIXL_POST_PROFILE=calibration) has no phase series,
+        # and a coverage number computed over none of them would read as 0% covered
+        # rather than "not measured".
+        have_phases = any(
+            by_type.get(EVENT_NAMES.index(n))
+            for n in NS_EVENTS
+            if n != "agent_post_phase_calibration"
+        )
         if post:
             # Medians, not sums: one connection-establishing post costs seconds and
             # would otherwise decide the coverage number by itself.
-            phase_p50_ns = sum(
-                pct(sorted(by_type.get(EVENT_NAMES.index(n), [])), 0.50)
-                for n in EVENT_NAMES
-                if n in NS_EVENTS and n != "agent_post_phase_calibration"
-            )
             post_p50_ns = pct(sorted(post), 0.50) * 1000.0
-            print(
-                f"gate: p50 sum(phases) = {phase_p50_ns / 1000.0:.2f} us vs "
-                f"p50 agent_xfer_post_time = {post_p50_ns / 1000.0:.2f} us "
-                f"({100.0 * phase_p50_ns / post_p50_ns:.1f}% covered, "
-                f"residual {100.0 * (post_p50_ns - phase_p50_ns) / post_p50_ns:.1f}%)"
-            )
-            n_post = len(post)
-            if n_post:
-                print(
-                    f"gate: per-descriptor p50 post = "
-                    f"{post_p50_ns / max(1, pct(sorted(by_type.get(EVENT_NAMES.index('agent_post_submitted_requests'), [1])), 0.50)):.0f} ns "
-                    f"(budget 400 ns at 40 GB/s x 16 KiB)"
+            if have_phases:
+                phase_p50_ns = sum(
+                    pct(sorted(by_type.get(EVENT_NAMES.index(n), [])), 0.50)
+                    for n in EVENT_NAMES
+                    if n in NS_EVENTS and n != "agent_post_phase_calibration"
                 )
+                print(
+                    f"gate: p50 sum(phases) = {phase_p50_ns / 1000.0:.2f} us vs "
+                    f"p50 agent_xfer_post_time = {post_p50_ns / 1000.0:.2f} us "
+                    f"({100.0 * phase_p50_ns / post_p50_ns:.1f}% covered, "
+                    f"residual {100.0 * (post_p50_ns - phase_p50_ns) / post_p50_ns:.1f}%)"
+                )
+            submitted = pct(
+                sorted(
+                    by_type.get(EVENT_NAMES.index("agent_post_submitted_requests"), [1])
+                ),
+                0.50,
+            )
+            print(
+                f"gate: per-descriptor p50 post = "
+                f"{post_p50_ns / max(1, submitted):.0f} ns "
+                f"(budget 400 ns at 40 GB/s x 16 KiB)"
+            )
         cal = by_type.get(EVENT_NAMES.index("agent_post_phase_calibration"), [])
         if cal:
             print(
