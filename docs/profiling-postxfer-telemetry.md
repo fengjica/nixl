@@ -542,7 +542,96 @@ and no phase attribution from step 4 is safe.
 
 ---
 
+### 7.6 R1 results (measured, 2026-09-01)
+
+Run 2 of the §7.3 schedule, executed first because it needs no timestamps:
+`NIXL_POST_PROFILE=calibration`, so only the always-on counters plus the
+calibration pair. Two `p6-b200.48xlarge` nodes, `libfabric 2.6.0amzn1.0`
+(`/opt/amazon/efa`), CUDA 13.1, VRAM→VRAM `WRITE`, 16 KiB blocks, PT OFF
+(`--progress-threads=0`, `--num-threads=1`), `--num-iter=1000 --warmup-iter=100`
+(reported as 1008/112), `--check-consistency=1`, one device per side.
+`agent_post_rails_touched` was 1 at every point, so these are **single-rail**
+numbers — multi-rail effects are absent by construction.
+
+| batch | B/W GB/s | Avg Post µs | ns/descriptor (p50) | EAGAIN attempts/post | Avg Tx µs |
+|---|---|---|---|---|---|
+| 16 | 5.91 | 6.3 | 375 | — | 37.9 |
+| 32 | 9.83 | 14.2 | 406 | — | 39.0 |
+| 64 | 16.17 | 21.5 | 328 | — | 43.3 |
+| 128 | 23.02 | 46.1 | 352 | — | 44.9 |
+| 256 | 29.29 | 92.9 | 359 | — | 50.2 |
+| 512 | **34.86** | 177.9 | 332 | — | 62.6 |
+| 1024 | 31.24 | 416.6 | 407 | — | 120.2 |
+| 2048 | 31.21 | 759.7 | 371 | — | 315.2 |
+| 4096 | 31.53 | 1793 | 437 | 161 | 334.9 |
+| 8192 | 27.43 | 4549 | 554 | 489 | 340.8 |
+| 16384 | 27.72 | 9342 | 570 | 1145 | 339.7 |
+| 32768 | 32.85 | 16004 | 488 | 2457 | 333.6 |
+
+**Three findings.**
+
+1. **Post time grows linearly in batch size, not superlinearly** — up to batch
+   2048 it is simply `batch × ~370 ns`. There is no per-post fixed cost blowing
+   up. The problem is that the *per-descriptor* cost is already at the §3 budget:
+   at 370 ns the post path alone caps a single rail at 16 KiB / 370 ns ≈
+   **44 GB/s**, before any overlap loss.
+2. **Posting, not the wire, is the critical path from batch 512 up.**
+   `B/W ≈ batch · 16 KiB / (Avg Post + Avg Tx)` reproduces every row (b512:
+   8 MiB / 240 µs = 34.9 GB/s). At b1024 post is 417 µs against 120 µs of
+   transfer — 78% of the critical path is submission. That, not the link, is why
+   bandwidth plateaus at 31–35 GB/s.
+3. **A second regime begins at batch 4096, and EAGAIN marks its onset.**
+   `agent_post_eagain_attempts` is *absent* — hence a true zero, since zero-valued
+   entries are never published — through 2048, appears at 4096, and climbs
+   161 → 2457 per post while per-descriptor cost climbs 371 → 570 ns.
+   `agent_post_eagain_max_attempts` is 4 at all four points: retry depth is
+   bounded, incidence is what grows.
+
+**Consequence for the §8 hypothesis: it holds for the knee only, not the
+baseline.** Backpressure inversion is the right story above 2048 — EAGAIN
+incidence and per-descriptor cost turn up together, exactly the predicted
+signature. It is the wrong story for the ~370 ns floor below the knee, which is
+paid with zero EAGAIN and is therefore CPU-side. The earlier batch-64 phase point
+puts `submit_loop` (P5) at ~92% of the post (20,221 ns of 22 µs), so the baseline
+lives inside the submit loop and the accumulators (A1–A3, A5) are what decompose
+it. Two separate costs, needing two separate fixes.
+
+**Validity evidence, per §7.5.** Every point recorded exactly 1120 samples per
+series (112 warmup + 1008 iterations), 1000 after `--skip 120`; staging drops 0
+everywhere; no ring wrap; calibration 18–33 ns, i.e. a noise floor ≤66 ns against
+a signal of 6–16,000 µs. Independent cross-check: nixlbench's own `Avg Post ÷
+batch` matches the telemetry per-descriptor p50 within a few percent at all 12
+points, and the two are measured by unrelated code paths.
+
+**Caveats to carry with these numbers.**
+
+- `agent_xfer_post_time` is **integer microseconds**, so one LSB is ±62 ns of a
+  375 ns figure at b16 (±17%), ±31 ns at b32, ±16 ns at b64. The apparent
+  flatness of 328–406 ns below b512 is therefore partly quantization; the
+  437/554/570/488 ns values above the knee are quantization-free.
+- `attempts ÷ batch` (3.9% at b4096 rising to 7.5% at b32768) is an **upper
+  bound** on the fraction of descriptors that stalled, since one submission can
+  contribute up to `max_attempts` = 4 attempts. The true distinct-stall fraction
+  is between `attempts/4` and `attempts`.
+- Two anomalies outside the post path, recorded but not investigated: `Avg Prep`
+  (`createXferReq`) jumps to 2231 µs at b8192 and 1689 µs at b16384 against
+  136 µs at b2048; and b32 is an outlier (444 ns/descriptor, 9.8 GB/s against
+  16.2 at b64).
+
+Artifacts: results rows for the whole ladder in `nixlbench_table.txt`, per-point
+event tables and gates in `b<N>.report.txt`, machine-readable `summary.csv`.
+
+**What R1 does not answer.** Which work inside the submit loop makes up the
+~370 ns baseline (needs A1/A2/A3/A5 at a batch below the knee), and how much of
+the 371 → 570 ns degradation is the inline CQ drain (needs A4 at 4096 and above,
+subject to the per-descriptor bias correction in §9).
+
+---
+
 ## 8. Interpretation
+
+R1 (§7.6) has already selected between the first two rows: the first applies
+above batch 2048, the second below it.
 
 | Observation | Conclusion |
 |---|---|
@@ -564,6 +653,16 @@ up exactly at the knee.
 the post never waited on a full queue, so the cost is CPU-side and lives in one of
 P2/P3/P4/A1. Record that outcome as a result rather than looking for a way to
 keep the hypothesis.
+
+**Run 2 outcome (§7.6): the prediction verified, and it accounts for less than
+expected.** The predicted signature appeared exactly as described — flat, then a
+knee at batch 4096 with `eagain_attempts` turning non-zero there and nowhere
+below. But the knee sits on top of a ~370 ns per-descriptor floor that is paid
+with *zero* EAGAIN, and that floor is already at the §3 budget on its own. So
+backpressure inversion explains the 371 → 570 ns degradation above 2048, not the
+reason a single rail cannot exceed ~44 GB/s of posting in the first place. The
+open question moved from "is it backpressure?" to "what costs 370 ns per
+descriptor inside `submit_loop`?"
 
 ---
 
@@ -587,6 +686,24 @@ keep the hypothesis.
   once, but the only correct answer is to set the post thread count to 0.
 - **Instrumentation is not free**, only affordable. Always publish the §7.4
   overhead deltas next to any result.
+- **The measured timestamp-pair cost is 27.6 ns, not the ~6–8 ns this document
+  estimated for `__rdtsc()`** (`libfabric_post_profile.h:40`). `__rdtsc` is not
+  serializing and the calibration measures issue-to-issue, so on p6-b200 the
+  empirical figure is 4× the estimate. Judge phases against the calibration line
+  in the report, never against the estimate. Consequences: a phase p50 within
+  ~2× of the noise floor is not a measurement — at batch 64 that retires
+  `conn_lookup` (60 ns) entirely and reduces `md_validate` (107 ns) and
+  `notif_prep` (122 ns) to "under ~150 ns".
+- **Accumulator bias scales with the batch.** A phase adds one timestamp pair per
+  post; an accumulator adds one *per descriptor* and sums the intervals, so its
+  reported total is inflated by roughly `batch × calibration_mean` — ~28 µs of a
+  ~417 µs post at batch 1024, ~0.9 ms of ~16 ms at batch 32768 (5–7% either way).
+  Subtract that before comparing an accumulator against the phase that contains
+  it, and read `agent_post_accum_*` p50s as upper bounds.
+- **`agent_xfer_post_time` is integer microseconds**, so per-descriptor figures
+  derived from it carry ±1 µs / batch of quantization: ±62 ns at batch 16, under
+  1 ns from batch 1024 up. Small-batch per-descriptor numbers cannot resolve
+  differences below ~60 ns.
 
 ---
 
@@ -600,6 +717,13 @@ keep the hypothesis.
 2. **Histogram units** — neither option as posed. Events keep native nanoseconds
    and the metric descriptor carries a `histogramScaleToUs` factor applied at
    bucket lookup only, so all three exporters share one bucket table. See §6.3.
+3. **Teardown flush is a prerequisite, not an optimization.** Telemetry exported
+   on a 100 ms timer with no flush at destruction, so a benchmark process that
+   exited mid-interval silently lost its tail — 419 of 1120 samples per series on
+   the first R1 dry run, with the drop gate legitimately reading 0 because nothing
+   had been *rejected*. `nixlTelemetry::~nixlTelemetry` now flushes once after the
+   pool is joined. Any result taken before that fix is a truncated prefix of the
+   run and should be discarded.
 
 **Still open:**
 
