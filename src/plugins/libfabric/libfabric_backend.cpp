@@ -1324,15 +1324,20 @@ nixlLibfabricEngine::postXferDescriptors(nixlLibfabricReq::OpType op_type,
     // posts on the same rail, so a per-chunk walk cannot know a rail's true last post there.
     const bool batch_writes = allow_fi_more && op_type == nixlLibfabricReq::WRITE;
 
-    std::vector<int> last_desc_idx_per_rail(rail_manager_.getNumRails(), -1);
-    std::vector<int> posts_since_flush(rail_manager_.getNumRails(), 0);
+    // Declared before the timer only so their lifetime outlives the submit loop; the
+    // allocations themselves are inside P4, since two heap allocations sized by rail
+    // count are part of what the prepass costs.
+    std::vector<int> last_desc_idx_per_rail;
+    std::vector<int> posts_since_flush;
     {
-        // P4: the FI_MORE prepass, which walks every descriptor a second time (plus
-        // two heap allocations sized by rail count) before a single request is
-        // submitted. A full extra pass over the batch is exactly the shape of cost
-        // that would show up as post latency rising with batch size.
+        // P4: the FI_MORE prepass, which allocates two per-rail vectors and then walks
+        // every descriptor a second time before a single request is submitted. A full
+        // extra pass over the batch is exactly the shape of cost that would show up as
+        // post latency rising with batch size.
         const postProfile::scopedPhase phase(
             nixl_telemetry_event_type_t::AGENT_POST_PHASE_FI_MORE_PREPASS);
+        last_desc_idx_per_rail.assign(rail_manager_.getNumRails(), -1);
+        posts_since_flush.assign(rail_manager_.getNumRails(), 0);
         if (batch_writes) {
             for (int i = start_idx; i < end_idx; ++i) {
                 const int rail_id = batchingRail(local, i, xfer_base_offset);
@@ -1717,6 +1722,11 @@ nixlLibfabricEngine::postXfer(const nixl_xfer_op_t &operation,
     // For very small transfers we can check for local completions immediately.
     if (backend_handle->is_completed()) {
         if (backend_handle->has_notif && backend_handle->operation_ == nixl_xfer_op_t::NIXL_READ) {
+            // P6, READ path: the same series as the WRITE-path send above, so
+            // agent_post_phase_notif_send means "the notification send" on either
+            // operation rather than silently covering only writes.
+            const postProfile::scopedPhase phase(
+                nixl_telemetry_event_type_t::AGENT_POST_PHASE_NOTIF_SEND);
             nixl_status_t notif_status = notifSendPriv(remote_agent,
                                                        backend_handle->binary_notifs,
                                                        backend_handle->total_notif_msg_len,

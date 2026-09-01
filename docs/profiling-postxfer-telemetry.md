@@ -147,6 +147,24 @@ P2 turned out to be O(n) rather than flat as the plan assumed: it also sizes the
 request-tracking table, which is `descCount × railCount`. That makes it a
 candidate explanation for the trend in its own right.
 
+**P1–P7 do not tile `postXfer` — they are not a partition, and `ΣP` is not the
+post.** What sits in the gaps between them, deliberately:
+
+- Argument marshalling, the handle cast and its null check, `descCount()`, and
+  two `NIXL_DEBUG` statements between P1 and P2.
+- `reserveBaseOffset()` (one atomic RMW) and the `use_post_pool` decision, between
+  P3 and the submit call.
+- `adjust_total_submitted_requests()` and a `NIXL_DEBUG`, between P5 and P6.
+- `is_completed()` after P7.
+- The whole thread-pool branch, which is unsupported (§6.5).
+
+Each is O(1) in batch size, so none can produce the trend under investigation,
+and timing them would cost more than they take. **The check that this is safe is
+the residual:** `AGENT_XFER_POST_TIME − ΣP` should be small and, crucially, *flat
+in batch size*. A residual that grows with batch means something O(n) is
+happening outside every phase and the map is wrong — chase that before
+interpreting any phase.
+
 ### Inner accumulators — summed across the loop, emitted once
 
 | Accumulator | `NIXL_POST_PROFILE` | Location |
