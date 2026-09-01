@@ -465,8 +465,16 @@ export NIXL_POST_PROFILE="agent_post_phase_*"
 ./nixlbench --backend=LIBFABRIC --op-type=WRITE \
   --start-block-size=16384 --max-block-size=16384 \
   --start-batch-size=64 --max-batch-size=64 \
-  --num-threads=1 --progress-threads=0 --warmup-iter=32 --num-iter=208
+  --num-threads=1 --progress-threads=0 --warmup-iter=100 --num-iter=1000 \
+  --check-consistency=1
 ```
+
+Both iteration counts are rounded **up** to a multiple of
+`num_threads * large_blk_iter_ftr` (`utils.cpp:747`), i.e. 16 here, so the run
+reports `num_iter=1008, warmup_iter=112` — the numbers to expect in the printed
+configuration and in the sample counts. The large-block divisor
+(`utils.cpp:1347`) applies above 1 MiB only, so a 16 KiB block runs the full
+count.
 
 Setting `NIXL_TELEMETRY_DIR` selects the built-in buffer exporter, which writes
 **raw per-event samples** to `$NIXL_TELEMETRY_DIR/<agent_name>` — full
@@ -506,7 +514,14 @@ the 400 ns budget, and the calibration noise floor). Unlike
 `examples/python/telemetry_reader.py` it does not consume the buffer, so it can
 run on a file left behind by an exited process.
 
-Pass `--skip <warmup_iter + a few>`. Warmup posts are in the buffer too, and the
+Expect exactly `warmup_iter + num_iter` samples per selected series (1120 for the
+configuration above). A shortfall with the drop gate at zero means samples were
+staged but never exported — the teardown flush in `nixlTelemetry::~nixlTelemetry`
+exists for that reason; before it, a run that ended between two 100 ms flushes
+lost its tail silently (701 of 1120 observed).
+
+Pass `--skip <warmup_iter + a few>`, using the *rounded* warmup count (112, not
+100), or warmup samples leak in. Warmup posts are in the buffer too, and the
 **first post pays connection establishment** — measured at 2.04 s inside
 `agent_post_phase_conn_lookup`, against a 60 ns median for that same phase. One
 such sample decides any mean or sum it lands in, which is why the coverage gate
