@@ -141,6 +141,17 @@ nixlTelemetry::~nixlTelemetry() {
         NIXL_DEBUG << "Failed to cancel telemetry write timer: " << e.what();
         // continue anyway since it's not critical
     }
+
+    // Whatever the last periodic flush did not reach is still in the staging
+    // queue, and a short-lived process can end an interval's worth of events
+    // (thousands, at post rates) that way without any drop being accounted.
+    // The pool is joined, so this thread is the only one touching the queue.
+    try {
+        flushPendingEvents();
+    }
+    catch (const std::exception &e) {
+        NIXL_DEBUG << "Failed to flush telemetry events at shutdown: " << e.what();
+    }
 }
 
 namespace {
