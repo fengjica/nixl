@@ -28,6 +28,8 @@
 
 #include <numa.h>
 
+namespace postProfile = nixl::libfabric::postProfile;
+
 // Forward declaration for LibfabricUtils namespace
 namespace LibfabricUtils {
 uint16_t
