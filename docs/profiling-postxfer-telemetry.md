@@ -782,7 +782,10 @@ machine-readable `summary.csv`; driver log `~/postprof_R2.log`.
 so it is not forgotten: nixlbench's `Avg Prep` (`createXferReq`) spikes to
 366/317/1279/1239 µs at b4096–b32768 against 125 µs at b2048. That is descriptor
 *preparation*, outside the `postXfer` path this document scopes, and it needs its
-own investigation.
+own investigation. Note that it is also far less stable than the post: R1 reported
+2231 µs at b8192 and 1689 µs at b16384 (§7.6) where R2 reported 317 and 1279 µs —
+a 3–7× run-to-run swing, against ~20% for post time. Whoever picks this up should
+treat the instability as part of the phenomenon rather than averaging it away.
 
 ---
 
@@ -857,20 +860,27 @@ open up.
   once, but the only correct answer is to set the post thread count to 0.
 - **Instrumentation is not free**, only affordable. Always publish the §7.4
   overhead deltas next to any result.
-- **The measured timestamp-pair cost is 27.6 ns, not the ~6–8 ns this document
+- **The measured timestamp-pair cost is 15–28 ns, not the ~6–8 ns this document
   estimated for `__rdtsc()`** (`libfabric_post_profile.h:40`). `__rdtsc` is not
   serializing and the calibration measures issue-to-issue, so on p6-b200 the
-  empirical figure is 4× the estimate. Judge phases against the calibration line
-  in the report, never against the estimate. Consequences: a phase p50 within
-  ~2× of the noise floor is not a measurement — at batch 64 that retires
-  `conn_lookup` (60 ns) entirely and reduces `md_validate` (107 ns) and
-  `notif_prep` (122 ns) to "under ~150 ns".
+  empirical figure is 2–4× the estimate. **It is not a constant**: R1 measured
+  27.6 ns (floor ~55 ns) and R2 measured 14.6 ns (floor ~30 ns) on the same nodes
+  with the same binary, so it varies with core placement and clock state between
+  runs. Judge phases against the calibration line **of the run being read**, never
+  against the estimate and never against another run's floor. Consequence: a phase
+  p50 within ~2× of *that run's* calibration is not a measurement — at batch 64
+  that retires `conn_lookup` (60 ns) under either floor, while `md_validate`
+  (105 ns) and `notif_prep` (120 ns) are measurements at R2's floor but not at
+  R1's.
 - **Accumulator bias scales with the batch.** A phase adds one timestamp pair per
   post; an accumulator adds one *per descriptor* and sums the intervals, so its
-  reported total is inflated by roughly `batch × calibration_mean` — ~28 µs of a
-  ~417 µs post at batch 1024, ~0.9 ms of ~16 ms at batch 32768 (5–7% either way).
-  Subtract that before comparing an accumulator against the phase that contains
-  it, and read `agent_post_accum_*` p50s as upper bounds.
+  reported total is inflated by roughly `batch × calibration_mean`. At R2's
+  14.6 ns that is ~15 µs of a ~419 µs post at batch 1024 and ~0.5 ms of ~16.5 ms
+  at batch 32768 (~3% either way); at R1's 27.6 ns it would be ~28 µs and ~0.9 ms
+  (5–7%). Since the multiplier is per-run, compute it from the run's own
+  calibration rather than reusing a figure quoted here. Subtract it before
+  comparing an accumulator against the phase that contains it, and read
+  `agent_post_accum_*` p50s as upper bounds.
 - **`agent_xfer_post_time` is integer microseconds, and the truncation is
   one-sided.** `nixlDuration::elapsed()` measures in ns via rdtsc but returns
   `std::chrono::microseconds` through a `duration_cast` that truncates toward zero
