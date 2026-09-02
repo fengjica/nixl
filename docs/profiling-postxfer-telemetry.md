@@ -427,28 +427,54 @@ it is what validates the exercise:
 
 ### 7.3 Schedule
 
-| Run | `NIXL_POST_PROFILE` | Cost | Purpose |
-|---|---|---|---|
-| 1 | `agent_post_phase_*` (P1–P7) | ~1% at B ≥ 64 | Locate the dominant region |
-| 2 | `eagain_attempts` | ~1 ns/desc | EAGAIN incidence vs. batch size |
-| 3+ | one of `rail_select` / `req_alloc` / `fi_writemsg` / `eagain_drain` / `cuda_ctx` | ~15 ns/desc | Only inside the region run 1 implicates |
+One run per line, in execution order, tagged with the `TAG=` the runner uses so
+a result can always be traced back to the selection that produced it. "Full
+ladder" is the §7.4 sweep, batch 16 → 32768 doubling, one nixlbench invocation
+per point.
 
-Runs 1 and 2 are cheap and may settle the question on their own: if run 1 shows
-the `progressActiveRails` tail (P7) and the submit loop (P5) growing
-superlinearly, and run 2 shows EAGAIN attempts climbing with batch, the
-backpressure hypothesis is confirmed without a single per-descriptor timer.
+| Run | `NIXL_POST_PROFILE` | Batches | Cost | Purpose | Status |
+|---|---|---|---|---|---|
+| `R1` | `calibration` (counters only) | full ladder | ~1 ns/desc | EAGAIN incidence and per-descriptor post vs. batch, with no phase timers at all | **done** — §7.6 |
+| `R2` | `agent_post_phase_*` | full ladder | ~1% at B ≥ 64 | Locate the dominant region among P1–P7 | **done** — §7.7 |
+| `R3` | `agent_post_accum_fi_writemsg,agent_post_phase_submit_loop` | full ladder | ~15 ns/desc | A3 is the prime suspect for the ~370 ns baseline after R2 | planned |
+| `R4` | `agent_post_accum_eagain_drain,agent_post_phase_submit_loop` | 2048 → 32768 | ~15 ns/desc | Test the §7.7 prediction of ~1.7–2.9 µs per EAGAIN attempt | planned |
+| `R5` | `agent_post_accum_rail_select,agent_post_accum_req_alloc,agent_post_phase_submit_loop` | full ladder | ~30 ns/desc | Neither is expected to dominate, so pairing them saves a run | planned |
+| `R6` | `agent_post_accum_cuda_ctx,agent_post_phase_submit_loop` | full ladder | ~15 ns/desc | CUDA context handling on the post path | planned |
+| `R0` | `off` | full ladder | none | Optional overhead-isolation reference, §7.5 step 1 | optional |
 
-**Run 2 needs no timestamps at all.** Note that `eagain_attempts` and
-`eagain_max_attempts` are always-on, so *any* selection reports them — run 2 is
-just the cheapest way to get them, by naming a counter and nothing else. Keep
-them **unsampled**: EAGAIN incidence is position-dependent within a batch (late
-descriptors meet a full send queue), so sampling would suppress the very signal
-being sought. The harness does not sample and has no sampling knob, deliberately.
+`R4` starts at 2048 deliberately: `agent_post_eagain_attempts` is a true zero
+below batch 4096 (§7.6), so a below-knee point would publish an empty
+`eagain_drain` series and waste the run. 2048 is included as the last
+zero-EAGAIN point, to confirm the series really is empty there rather than
+missing.
 
-For runs 3+, note that `submit_loop` (P5) is the aggregate the accumulators
-decompose. Selecting `submit_loop` alongside one accumulator in the same run
-costs one extra timestamp pair per post and gives you the total to check the
-accumulator against; that is usually worth it.
+**R1 needed no timestamps at all.** `eagain_attempts` and `eagain_max_attempts`
+are always-on, so *any* selection reports them — naming a counter and nothing
+else was just the cheapest way to get them. Keep them **unsampled**: EAGAIN
+incidence is position-dependent within a batch (late descriptors meet a full send
+queue), so sampling would suppress the very signal being sought. The harness does
+not sample and has no sampling knob, deliberately.
+
+R1 and R2 were cheap and between them settled where to look, though not the way
+§8 expected: the submit loop (P5) does carry the whole batch-size trend, but the
+`progressActiveRails` tail (P7) saturates at ~1.6 µs and grew with nothing
+(§7.7). EAGAIN attempts do climb with batch, so the backpressure half of the
+hypothesis stands on counters alone — but only above the knee, and it leaves the
+~370 ns baseline unexplained. That is what R3–R6 are for.
+
+For R3–R6, note that `submit_loop` (P5) is the aggregate the accumulators
+decompose, which is why each of those runs selects it alongside: one extra
+timestamp pair per post buys the total to check the accumulator against. Two
+planning inputs for those runs:
+
+- **Subtract the accumulator bias before comparing.** An accumulator takes one
+  timestamp pair *per descriptor*, so its reported total is inflated by roughly
+  `batch × calibration_mean` (§9) — with R2's 15 ns calibration that is ~15 µs of
+  a ~419 µs post at batch 1024 and ~0.5 ms of ~16.5 ms at batch 32768. Read
+  `agent_post_accum_*` p50s as upper bounds.
+- **Selecting two accumulators doubles that bias** (`R5`), which is affordable
+  only because both are expected to be small. Do not pair `fi_writemsg` with
+  anything.
 
 ### 7.4 Sweep and configuration
 
@@ -631,6 +657,135 @@ subject to the per-descriptor bias correction in §9).
 
 ---
 
+### 7.7 R2 results (phases P1–P7, measured 2026-09-02)
+
+`R2` of the §7.3 schedule, i.e. `NIXL_POST_PROFILE='agent_post_phase_*'` — all
+seven outer phases, no accumulators. Conditions identical to §7.6 in every other
+respect: the same two `p6-b200.48xlarge` nodes, `libfabric 2.6.0amzn1.0`
+(`/opt/amazon/efa`), CUDA 13.1, VRAM→VRAM `WRITE`, 16 KiB blocks, PT OFF
+(`--progress-threads=0 --num-threads=1`), `--num-iter=1000 --warmup-iter=100`
+(reported as 1008/112), `--check-consistency=1`, one device per side,
+`agent_post_rails_touched` = 1 throughout, so again **single-rail**.
+
+All figures are p50, in ns except the two columns marked µs. P5 is
+`submit_loop`; "share" is P5 as a fraction of the post.
+
+| batch | post µs | P1 conn_lookup | P2 notif_prep | P3 md_validate | P4 fi_more_prepass | P5 submit_loop µs | P6 notif_send | P7 progress_tail | P5 share | P5 ns/desc | calib | coverage |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 16 | 6 | 50 | 110 | 39 | 148 | 4.86 | 610 | 167 | 81% | 303 | 15 | 99.7% |
+| 32 | 11 | 55 | 117 | 65 | 173 | 9.79 | 615 | 170 | 89% | 306 | 15 | 99.9% |
+| 64 | 21 | 62 | 120 | 105 | 269 | 20.00 | 612 | 170 | 95% | 313 | 15 | 101.6% |
+| 128 | 43 | 60 | 124 | 186 | 478 | 39.59 | 1708 | 390 | 92% | 309 | 15 | 98.9% |
+| 256 | 108 | 59 | 126 | 371 | 887 | 100.73 | 4341 | 1038 | 93% | 393 | 15 | 99.6% |
+| 512 | 205 | 65 | 122 | 690 | 1708 | 197.16 | 4417 | 1035 | 96% | 385 | 15 | 100.1% |
+| 1024 | 419 | 61 | 238 | 1520 | 3399 | 406.73 | 5213 | 1196 | 97% | 397 | 15 | 99.8% |
+| 2048 | 761 | 136 | 377 | 4110 | 6803 | 737.30 | 8773 | 1556 | 97% | 360 | 15 | 99.7% |
+| 4096 | 1841 | 195 | 429 | 9555 | 13584 | 1809.70 | 2658 | 1660 | 98% | 442 | 15 | 99.8% |
+| 8192 | 3839 | 185 | 443 | 16982 | 26836 | 3787.24 | 2732 | 1581 | 99% | 462 | 15 | 99.9% |
+| 16384 | 9359 | 214 | 479 | 37202 | 53534 | 9255.90 | 3045 | 1637 | 99% | 565 | 15 | 99.9% |
+| 32768 | 16478 | 200 | 500 | 73072 | 108712 | 16283.40 | 3069 | 1647 | 99% | 497 | 15 | 100.0% |
+
+**Five findings.**
+
+1. **The post *is* the submit loop.** P5 is 81% of the post at batch 16 and
+   95–99% from batch 64 up; above 4096 the other six phases together account for
+   ~1% (190 µs of a 16.5 ms post at b32768). More than the share: P5's
+   per-descriptor cost — 303, 306, 313, 309, 393, 385, 397, 360, 442, 462, 565,
+   497 ns across the ladder — reproduces the *entire* two-regime shape of the post
+   itself, flat baseline then knee. Both the ~370 ns floor and its degradation
+   above 2048 therefore live inside `prepareAndSubmitTransfer`, and only the
+   accumulators can decompose them further. Every phase-level question is now
+   answered.
+2. **P7 `progress_tail` is exonerated, which falsifies half the §8 leading
+   hypothesis.** It is 167 ns at batch 16 and saturates at ~1.6 µs — a 10×
+   increase against a 2048× increase in batch, and ≤0.01% of the post above 4096.
+   The hypothesis named "the EAGAIN retry loop plus the `progressActiveRails` tail
+   at the end of `postXfer`"; the tail half is dead. Whatever inline CQ progress
+   costs under PT OFF, it is paid *inside* the submit loop, not after it.
+3. **The two O(batch) pre-passes are real but far too small to matter.**
+   `md_validate` costs ~1.5–2.3 ns/descriptor and `fi_more_prepass` a flat
+   ~3.3 ns/descriptor at every point from batch 32 up — genuinely linear in the
+   descriptor count, as §8's second row predicted, but together ~5 ns/descriptor,
+   or ~1.4% of the 400 ns budget (182 µs of the 16.5 ms post at b32768).
+   Eliminating both redundant pre-passes would return ~1% of the post. Neither
+   explains the ~370 ns.
+4. **P6 `notif_send`, the designed control, is non-monotonic — and that is
+   evidence of backpressure appearing before EAGAIN does.** It is one send
+   regardless of batch size, so it should be constant. Instead it holds at ~610 ns
+   through batch 64, climbs to **8773 ns at 2048**, then *falls back* to
+   2.7–3.1 µs at 4096 and above. Read against the EAGAIN column of §7.6 the shape
+   is coherent: below the knee, TX-queue pressure builds through the submit loop
+   with nothing draining it and the trailing notification pays for the fullness it
+   finds; at and above the knee, the inline drains during EAGAIN retries have
+   already relieved the queue, so the notification is cheap again. A single
+   batch-independent send costing 14× more at b2048 than at b16 is queue state,
+   not work — and it registers a full octave of batch sizes *before*
+   `eagain_attempts` becomes non-zero.
+5. **P1 and P2 are negligible.** `conn_lookup` 50–214 ns and `notif_prep`
+   110–500 ns across the whole ladder. At small batch `conn_lookup` sits within
+   ~2× the noise floor, so per §9 it is not a measurement there — which is fine,
+   because it is ~0.001% of the post at the sizes that matter.
+
+**A falsifiable prediction for `R4`.** Take 360 ns/descriptor — P5 at batch 2048,
+the last zero-EAGAIN point — as the drain-free cost, and attribute all excess
+above the knee to retries:
+
+| batch | P5 excess over 360 ns/desc | EAGAIN attempts/post (§7.6) | excess per attempt |
+|---|---|---|---|
+| 4096 | 335 µs | 161 | 2.1 µs |
+| 8192 | 838 µs | 489 | 1.7 µs |
+| 16384 | 3.36 ms | 1145 | 2.9 µs |
+| 32768 | 4.49 ms | 2457 | 1.8 µs |
+
+Four points landing in a 1.7–2.9 µs band is not what an accidental correlation
+looks like. So: **if `agent_post_accum_eagain_drain` comes back at ~1.7–2.9 µs
+per attempt, the knee is fully explained by inline CQ drains** and the fix is
+decoupling. If it comes back materially smaller, the excess is instead extra
+`fi_writemsg` calls — each retry re-enters the provider — and `R3` (A3) is where
+it will show up. Either outcome is a result; record it.
+
+**Validity evidence, per §7.5.** Every point recorded exactly 1120 samples per
+series (112 warmup + 1008 iterations), 1000 after `--skip 120`; staging drops 0
+everywhere; no ring wrap; phase coverage against `agent_xfer_post_time` between
+98.9% and 100.1% at eleven of twelve points, so P1–P7 account for essentially the
+whole post and no hidden residual is being attributed by omission. Calibration
+p50 was 15 ns (mean 14.6, noise floor ~30 ns), against 27.6 ns in R1 — the
+harness cost 14 clock reads ≈ 205 ns per post, invisible at every batch, and the
+reported post times match R1's within run-to-run spread.
+
+**Caveats to carry with these numbers.**
+
+- **Batch 64 reads 101.6% coverage, a negative residual.** Not a defect: the gate
+  sums twelve independent per-phase p50s and divides by the p50 of a denominator
+  quantized to whole microseconds (21.34 µs of phases against a post reported as
+  21). That is the same one-sided truncation recorded in §9, here landing on the
+  denominator. Read anything within ±2% of 100% as fully covered.
+- **Run-to-run spread reaches ~20%, so read the shape and not the points.**
+  Per-descriptor post, R1 → R2: b256 359 → 422, b512 332 → 400, b8192 554 → 469;
+  nixlbench's bandwidth peak moved from 34.86 GB/s at b512 to 31.90 GB/s at
+  b1024. The two-regime *shape* — flat ~310–400 ns, knee at 4096, degradation
+  above — is what reproduced. A difference between adjacent batch points below
+  ~20% is not resolvable from one run, and b2048 reading lower than b1024 means
+  nothing.
+- **EAGAIN counts are bit-identical to R1** (161/489/1145/2457 attempts,
+  `max_attempts` 4 at all four points). Given the ~20% spread in timing, that
+  exactness says the queue-depth behaviour is deterministic rather than a sampling
+  artefact — which is what makes the `R4` prediction above worth testing.
+
+Artifacts: `~/postprof_runs/R2/` — per-point event tables and gates in
+`b<N>.report.txt`, results rows for the whole ladder in `nixlbench_table.txt`,
+machine-readable `summary.csv`; driver log `~/postprof_R2.log`.
+
+**What R2 does not answer.** How the ~390 ns inside `submit_loop` splits between
+`rail_select`, `req_alloc`, `fi_writemsg` and `cuda_ctx` — that is `R3`, `R5` and
+`R6`, subject to the accumulator bias correction in §9. Separately, and noted only
+so it is not forgotten: nixlbench's `Avg Prep` (`createXferReq`) spikes to
+366/317/1279/1239 µs at b4096–b32768 against 125 µs at b2048. That is descriptor
+*preparation*, outside the `postXfer` path this document scopes, and it needs its
+own investigation.
+
+---
+
 ## 8. Interpretation
 
 R1 (§7.6) has already selected between the first two rows: the first applies
@@ -666,6 +821,19 @@ backpressure inversion explains the 371 → 570 ns degradation above 2048, not t
 reason a single rail cannot exceed ~44 GB/s of posting in the first place. The
 open question moved from "is it backpressure?" to "what costs 370 ns per
 descriptor inside `submit_loop`?"
+
+**R2 outcome (§7.7): one half of the leading hypothesis survived, the other is
+dead.** The hypothesis named two mechanisms. The EAGAIN retry loop stands — and
+is now corroborated by something independent of the counters, because P6
+`notif_send`, a single send that does the same work at every batch size, costs 14×
+more at b2048 than at b16 and then gets cheaper once the retries begin draining
+the queue. That is TX-queue fullness observed directly, and it starts an octave
+below the knee. The `progressActiveRails` tail is dead: P7 never exceeds ~1.6 µs
+and is ≤0.01% of the post where it would have had to matter. So the second row of
+the table above is also settled, and settled small — P3 + P4 are real O(batch)
+costs worth ~1% of the post, not the explanation. Everything that remains
+unexplained is inside P5, which is what the accumulator runs `R3`–`R6` exist to
+open up.
 
 ---
 
