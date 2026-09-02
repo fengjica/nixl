@@ -437,16 +437,30 @@ per point.
 | `R1` | `calibration` (counters only) | full ladder | ~1 ns/desc | EAGAIN incidence and per-descriptor post vs. batch, with no phase timers at all | **done** — §7.6 |
 | `R2` | `agent_post_phase_*` | full ladder | ~1% at B ≥ 64 | Locate the dominant region among P1–P7 | **done** — §7.7 |
 | `R3` | `agent_post_accum_fi_writemsg,agent_post_phase_submit_loop` | full ladder | ~15 ns/desc | A3 is the prime suspect for the ~370 ns baseline after R2 | planned |
-| `R4` | `agent_post_accum_eagain_drain,agent_post_phase_submit_loop` | 2048 → 32768 | ~15 ns/desc | Test the §7.7 prediction of ~1.7–2.9 µs per EAGAIN attempt | planned |
+| `R4` | `agent_post_accum_eagain_drain,agent_post_phase_submit_loop` | full ladder | ~15 ns/desc | Test the §7.7 prediction of ~1.7–2.9 µs per EAGAIN attempt, with its own drain-free baseline | planned |
 | `R5` | `agent_post_accum_rail_select,agent_post_accum_req_alloc,agent_post_phase_submit_loop` | full ladder | ~30 ns/desc | Neither is expected to dominate, so pairing them saves a run | planned |
 | `R6` | `agent_post_accum_cuda_ctx,agent_post_phase_submit_loop` | full ladder | ~15 ns/desc | CUDA context handling on the post path | planned |
 | `R0` | `off` | full ladder | none | Optional overhead-isolation reference, §7.5 step 1 | optional |
 
-`R4` starts at 2048 deliberately: `agent_post_eagain_attempts` is a true zero
-below batch 4096 (§7.6), so a below-knee point would publish an empty
-`eagain_drain` series and waste the run. 2048 is included as the last
-zero-EAGAIN point, to confirm the series really is empty there rather than
-missing.
+`R4` runs the whole ladder even though `agent_post_eagain_attempts` is a true zero
+below batch 4096 (§7.6), so its `eagain_drain` series is empty at the first five
+points. That is the point: the §7.7 prediction subtracts a drain-free baseline of
+360 ns/descriptor from P5 above the knee, and R4 must supply that baseline **from
+its own below-knee points**, not from R2's. Two reasons.
+
+- **Cross-run subtraction is not safe here.** R2 measured up to ~20% run-to-run
+  spread in per-descriptor post time (§7.7), which is larger than the effect being
+  bounded at the low end.
+- **The answer is sensitive to which baseline point is chosen.** At batch 32768,
+  differencing against 360 ns/desc (R2's b2048) yields 1.8 µs per attempt, against
+  385 ns (b512) 1.5 µs, against 397 ns (b1024) 1.3 µs. A ±10% baseline moves the
+  result ~30% — wider than the 1.7–2.9 µs band it is being tested against, so the
+  prediction could be rejected on baseline choice alone.
+
+The below-knee points cost one timestamp pair per post and no accumulator samples
+at all, which makes this the cheapest part of the run. State the test as a
+within-run one: `submit_loop` minus `eagain_drain`, per descriptor, should be flat
+across all twelve points if the drains are the whole story above the knee.
 
 **R1 needed no timestamps at all.** `eagain_attempts` and `eagain_max_attempts`
 are always-on, so *any* selection reports them — naming a counter and nothing
@@ -743,6 +757,13 @@ per attempt, the knee is fully explained by inline CQ drains** and the fix is
 decoupling. If it comes back materially smaller, the excess is instead extra
 `fi_writemsg` calls — each retry re-enters the provider — and `R3` (A3) is where
 it will show up. Either outcome is a result; record it.
+
+The band above is derived across runs and is therefore only indicative. The 360 ns
+baseline comes from R2's b2048, and a ±10% shift in it moves the per-attempt figure
+by ~30% (§7.3), so R4 must re-derive its baseline from its own below-knee points
+and be judged on the within-run form of the test: `submit_loop` minus
+`eagain_drain`, per descriptor, flat across the ladder. Treat 1.7–2.9 µs as the
+order of magnitude to confirm or refute, not as a threshold.
 
 **Validity evidence, per §7.5.** Every point recorded exactly 1120 samples per
 series (112 warmup + 1008 iterations), 1000 after `--skip 120`; staging drops 0
